@@ -1,1036 +1,464 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
-from scipy import stats
-from sklearn.ensemble import IsolationForest
-from sklearn.covariance import EllipticEnvelope
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-from sklearn.metrics import r2_score, mean_squared_error
-from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import Ridge
-import pickle
-import json
+import altair as alt
 import io
-from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
 
-# Настройка страницы
-st.set_page_config(
-    page_title="Анализатор сигма-фазы",
-    page_icon="🔬",
-    layout="wide"
-)
+# Данные по размерам зерен из ГОСТ
+GRAIN_DATA = {
+    'G': [-3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14],
+    'a_v': [1.000, 0.500, 0.250, 0.125, 0.0625, 0.0312, 0.0156, 0.00781, 0.00390, 
+            0.00195, 0.00098, 0.00049, 0.000244, 0.000122, 0.000061, 0.000030, 0.000015, 0.000008],
+    'd_av': [1.000, 0.707, 0.500, 0.353, 0.250, 0.177, 0.125, 0.088, 0.062, 
+             0.044, 0.031, 0.022, 0.015, 0.011, 0.0079, 0.0056, 0.0039, 0.0027]
+}
 
-# Заголовок приложения
-st.title("🔬 Анализатор кинетики образования сигма-фазы в стали 12Х18Н12Т")
-st.markdown("""
-### Определение температурной зависимости по содержанию сигма-фазы, времени эксплуатации и номеру зерна
-""")
+grain_df = pd.DataFrame(GRAIN_DATA)
+grain_df['inv_sqrt_a_v'] = 1 / np.sqrt(grain_df['a_v'])
+grain_df['ln_inv_sqrt_a_v'] = np.log(grain_df['inv_sqrt_a_v'])
 
-class ComplexDataParser:
-    """Класс для парсинга сложных Excel файлов с данными сигма-фазы"""
-    
-    @staticmethod
-    def parse_complex_excel(file_path):
-        """Парсинг сложного Excel файла с экспериментальными данными"""
-        try:
-            # Читаем файл
-            df = pd.read_excel(file_path, sheet_name=0, header=None)
-            
-            results = []
-            
-            # Проходим по строкам с данными (начиная со строки 2, так как строка 1 - заголовок)
-            for i in range(2, len(df)):
-                row = df.iloc[i]
-                
-                # Проверяем, есть ли основные данные в первых 4 колонках
-                if pd.notna(row[0]) and pd.notna(row[1]) and pd.notna(row[2]) and pd.notna(row[3]):
-                    try:
-                        G = float(row[0])
-                        T = float(row[1])
-                        t = float(row[2])
-                        f_exp = float(row[3])
-                        
-                        # Проверяем корректность данных
-                        if (G in [3, 5, 8, 9, 10] and 
-                            T in [600, 650, 700] and 
-                            t in [2000, 4000, 6000, 8000] and
-                            0 <= f_exp <= 10):
-                            
-                            results.append({
-                                'G': G,
-                                'T': T, 
-                                't': t,
-                                'f_exp (%)': f_exp
-                            })
-                    except (ValueError, TypeError):
-                        continue
-            
-            return pd.DataFrame(results)
-            
-        except Exception as e:
-            raise Exception(f"Ошибка парсинга файла: {e}")
-
-    @staticmethod
-    def extract_all_data(uploaded_file):
-        """Извлечение всех данных из загруженного файла"""
-        try:
-            # Создаем временный файл
-            with open("temp_file.xlsx", "wb") as f:
-                f.write(uploaded_file.getvalue())
-            
-            # Парсим данные
-            data = ComplexDataParser.parse_complex_excel("temp_file.xlsx")
-            
-            # Удаляем временный файл
-            import os
-            if os.path.exists("temp_file.xlsx"):
-                os.remove("temp_file.xlsx")
-                
-            # ВОЗВРАЩАЕМ ТОЛЬКО ЕСЛИ ЕСТЬ ДАННЫЕ
-            if data is not None and len(data) > 0:
-                return data
-            else:
-                return None
-                
-        except Exception as e:
-            st.error(f"❌ Ошибка извлечения данных: {e}")
-            return None
-
-class DataValidator:
-    """Класс для валидации и нормализации данных"""
-    
-    @staticmethod
-    def normalize_column_names(df):
-        """Нормализует названия колонок к стандартному формату"""
-        column_mapping = {
-            'Номер_зерна': 'G', 'Номер зерна': 'G', 'Зерно': 'G',
-            'Температура': 'T', 'Температура_C': 'T', 'Температура °C': 'T',
-            'Время': 't', 'Время_ч': 't', 'Время, ч': 't',
-            'Сигма_фаза': 'f_exp (%)', 'Сигма-фаза': 'f_exp (%)', 
-            'Сигма_фаза_%': 'f_exp (%)', 'Сигма фаза': 'f_exp (%)',
-            'Grain': 'G', 'Grain_number': 'G', 'Grain size': 'G',
-            'Temperature': 'T', 'Temp': 'T', 'Temperature_C': 'T',
-            'Time': 't', 'Time_h': 't', 'Hours': 't',
-            'Sigma_phase': 'f_exp (%)', 'Sigma': 'f_exp (%)', 
-            'Sigma_%': 'f_exp (%)', 'f_exp': 'f_exp (%)'
-        }
-        
-        df_normalized = df.copy()
-        new_columns = {}
-        
-        for col in df.columns:
-            col_clean = str(col).strip()
-            if col_clean in column_mapping:
-                new_columns[col] = column_mapping[col_clean]
-            else:
-                new_columns[col] = col_clean
-        
-        df_normalized.columns = [new_columns[col] for col in df.columns]
-        return df_normalized
-    
-    @staticmethod
-    def validate_data(df):
-        """Проверяет наличие обязательных колонок и корректность данных"""
-        required_columns = ['G', 'T', 't', 'f_exp (%)']
-        
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            return False, f"Отсутствуют обязательные колонки: {missing_columns}"
-        
-        try:
-            df['G'] = pd.to_numeric(df['G'], errors='coerce')
-            df['T'] = pd.to_numeric(df['T'], errors='coerce')
-            df['t'] = pd.to_numeric(df['t'], errors='coerce')
-            df['f_exp (%)'] = pd.to_numeric(df['f_exp (%)'], errors='coerce')
-        except Exception as e:
-            return False, f"Ошибка преобразования типов данных: {e}"
-        
-        if df[required_columns].isna().any().any():
-            return False, "Обнаружены пустые или некорректные значения в данных"
-        
-        if (df['G'] < -3).any() or (df['G'] > 14).any():
-            return False, "Номер зерна должен быть в диапазоне от -3 до 14"
-        
-        if (df['T'] < 500).any() or (df['T'] > 1000).any():
-            st.warning("⚠️ Некоторые температуры выходят за typical диапазон 500-1000°C")
-        
-        if (df['f_exp (%)'] < 0).any() or (df['f_exp (%)'] > 50).any():
-            st.warning("⚠️ Некоторые значения содержания сигма-фазы выходят за typical диапазон 0-50%")
-        
-        DataValidator.validate_time_range(df['t'])
-        
-        return True, "Данные валидны"
-    
-    @staticmethod
-    def validate_time_range(t_values):
-        """Проверка диапазона времени эксплуатации"""
-        max_time = 500000
-        if (t_values > max_time).any():
-            st.warning(f"⚠️ Обнаружены значения времени эксплуатации свыше {max_time} часов")
-        return True
-
-class GrainSizeConverter:
-    """Класс для преобразования номера зерна в физические параметры по ГОСТ 5639-82"""
-    
-    GRAIN_DATA = {
-        -3: {'area_mm2': 1.000, 'diameter_mm': 1.000, 'conditional_diameter_mm': 0.875, 'grains_per_mm2': 1.0},
-        -2: {'area_mm2': 0.500, 'diameter_mm': 0.707, 'conditional_diameter_mm': 0.650, 'grains_per_mm2': 2.8},
-        -1: {'area_mm2': 0.250, 'diameter_mm': 0.500, 'conditional_diameter_mm': 0.444, 'grains_per_mm2': 8.0},
-        0:  {'area_mm2': 0.125, 'diameter_mm': 0.353, 'conditional_diameter_mm': 0.313, 'grains_per_mm2': 22.6},
-        1:  {'area_mm2': 0.0625, 'diameter_mm': 0.250, 'conditional_diameter_mm': 0.222, 'grains_per_mm2': 64.0},
-        2:  {'area_mm2': 0.0312, 'diameter_mm': 0.177, 'conditional_diameter_mm': 0.157, 'grains_per_mm2': 181.0},
-        3:  {'area_mm2': 0.0156, 'diameter_mm': 0.125, 'conditional_diameter_mm': 0.111, 'grains_per_mm2': 512.0},
-        4:  {'area_mm2': 0.00781, 'diameter_mm': 0.088, 'conditional_diameter_mm': 0.0783, 'grains_per_mm2': 1448.0},
-        5:  {'area_mm2': 0.00390, 'diameter_mm': 0.062, 'conditional_diameter_mm': 0.0553, 'grains_per_mm2': 4096.0},
-        6:  {'area_mm2': 0.00195, 'diameter_mm': 0.044, 'conditional_diameter_mm': 0.0391, 'grains_per_mm2': 11585.0},
-        7:  {'area_mm2': 0.00098, 'diameter_mm': 0.031, 'conditional_diameter_mm': 0.0267, 'grains_per_mm2': 32768.0},
-        8:  {'area_mm2': 0.00049, 'diameter_mm': 0.022, 'conditional_diameter_mm': 0.0196, 'grains_per_mm2': 92682.0},
-        9:  {'area_mm2': 0.000244, 'diameter_mm': 0.015, 'conditional_diameter_mm': 0.0138, 'grains_per_mm2': 262144.0},
-        10: {'area_mm2': 0.000122, 'diameter_mm': 0.011, 'conditional_diameter_mm': 0.0099, 'grains_per_mm2': 741485.0},
-        11: {'area_mm2': 0.000061, 'diameter_mm': 0.0079, 'conditional_diameter_mm': 0.0069, 'grains_per_mm2': 2097152.0},
-        12: {'area_mm2': 0.000030, 'diameter_mm': 0.0056, 'conditional_diameter_mm': 0.0049, 'grains_per_mm2': 5931008.0},
-        13: {'area_mm2': 0.000015, 'diameter_mm': 0.0039, 'conditional_diameter_mm': 0.0032, 'grains_per_mm2': 16777216.0},
-        14: {'area_mm2': 0.000008, 'diameter_mm': 0.0027, 'conditional_diameter_mm': 0.0027, 'grains_per_mm2': 47449064.0}
-    }
-    
-    @classmethod
-    def grain_number_to_area(cls, grain_number):
-        """Преобразование номера зерна в среднюю площадь сечения (мм²)"""
-        data = cls.GRAIN_DATA.get(grain_number)
-        if data:
-            return data['area_mm2']
-        else:
-            numbers = sorted(cls.GRAIN_DATA.keys())
-            if grain_number < numbers[0]:
-                return cls.GRAIN_DATA[numbers[0]]['area_mm2']
-            elif grain_number > numbers[-1]:
-                return cls.GRAIN_DATA[numbers[-1]]['area_mm2']
-            else:
-                lower = max([n for n in numbers if n <= grain_number])
-                upper = min([n for n in numbers if n >= grain_number])
-                if lower == upper:
-                    return cls.GRAIN_DATA[lower]['area_mm2']
-                log_area_lower = np.log(cls.GRAIN_DATA[lower]['area_mm2'])
-                log_area_upper = np.log(cls.GRAIN_DATA[upper]['area_mm2'])
-                fraction = (grain_number - lower) / (upper - lower)
-                log_area = log_area_lower + fraction * (log_area_upper - log_area_lower)
-                return np.exp(log_area)
-    
-    @classmethod
-    def grain_number_to_diameter(cls, grain_number, use_conditional=True):
-        """Преобразование номера зерна в диаметр (мм)"""
-        data = cls.GRAIN_DATA.get(grain_number)
-        if data:
-            return data['conditional_diameter_mm'] if use_conditional else data['diameter_mm']
-        else:
-            numbers = sorted(cls.GRAIN_DATA.keys())
-            if grain_number < numbers[0]:
-                return cls.GRAIN_DATA[numbers[0]]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[numbers[0]]['diameter_mm']
-            elif grain_number > numbers[-1]:
-                return cls.GRAIN_DATA[numbers[-1]]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[numbers[-1]]['diameter_mm']
-            else:
-                lower = max([n for n in numbers if n <= grain_number])
-                upper = min([n for n in numbers if n >= grain_number])
-                if lower == upper:
-                    return cls.GRAIN_DATA[lower]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[lower]['diameter_mm']
-                diam_lower = cls.GRAIN_DATA[lower]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[lower]['diameter_mm']
-                diam_upper = cls.GRAIN_DATA[upper]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[upper]['diameter_mm']
-                fraction = (grain_number - lower) / (upper - lower)
-                return diam_lower + fraction * (diam_upper - diam_lower)
-    
-    @classmethod
-    def calculate_grain_boundary_density(cls, grain_number):
-        """Расчет плотности границ зерен (мм²/мм³)"""
-        d = cls.grain_number_to_diameter(grain_number, use_conditional=True)
-        Sv = 3.0 / (d / 2.0)
-        return Sv
-    
-    @classmethod
-    def calculate_activation_energy_factor(cls, grain_number):
-        """Коэффициент влияния размера зерна на энергию активации"""
-        ref_grain = 5
-        Sv_ref = cls.calculate_grain_boundary_density(ref_grain)
-        Sv_current = cls.calculate_grain_boundary_density(grain_number)
-        return Sv_current / Sv_ref
-
-class SigmaPhaseAnalyzer:
+class SigmaPhaseModel:
     def __init__(self):
-        self.params = None
-        self.R2 = None
+        self.coef_ = None
+        self.intercept_ = None
+        self.r2 = None
         self.rmse = None
-        self.mape = None
-        self.model_type = None
-        self.final_formula = ""
+        self.mae = None
         
-    def fit_model(self, data, model_type="avrami_saturation"):
-        """Подгонка выбранной модели с физическими ограничениями"""
+    def fit(self, X, y):
+        """Линейная регрессия с использованием метода наименьших квадратов"""
+        # Добавляем столбец для intercept
+        X_with_intercept = np.column_stack([np.ones(X.shape[0]), X])
+        
+        # Решаем нормальное уравнение: (X^T X)^{-1} X^T y
         try:
-            # Фильтруем данные для рабочего диапазона 580-630°C
-            working_data = data[(data['T'] >= 580) & (data['T'] <= 630)].copy()
+            coefficients = np.linalg.inv(X_with_intercept.T @ X_with_intercept) @ X_with_intercept.T @ y
+            self.intercept_ = coefficients[0]
+            self.coef_ = coefficients[1:]
             
-            # Если в рабочем диапазоне мало данных, используем все данные но с весами
-            if len(working_data) < 8:
-                weights = np.ones(len(data))
-                # Даем больший вес точкам в рабочем диапазоне
-                weights[(data['T'] >= 580) & (data['T'] <= 630)] = 3.0
-                weights[(data['T'] >= 550) & (data['T'] < 580)] = 1.5
-                weights[(data['T'] > 630) & (data['T'] <= 700)] = 1.5
-                used_data = data
-            else:
-                weights = np.ones(len(working_data))
-                used_data = working_data
+            # Расчет метрик
+            y_pred = self.predict_ln_d(X)
+            self.r2 = self.calculate_r2(y, y_pred)
+            self.rmse = self.calculate_rmse(y, y_pred)
+            self.mae = self.calculate_mae(y, y_pred)
             
-            G = used_data['G'].values
-            T = used_data['T'].values + 273.15  # в Кельвины
-            t = used_data['t'].values
-            f_exp = used_data['f_exp (%)'].values
-            
-            self.model_type = model_type
-            
-            if model_type == "avrami_saturation":
-                success = self._fit_avrami_model(G, T, t, f_exp, weights)
-            elif model_type == "power_law":
-                success = self._fit_power_law_model(G, T, t, f_exp, weights)
-            elif model_type == "logistic":
-                success = self._fit_logistic_model(G, T, t, f_exp, weights)
-            elif model_type == "ensemble":
-                success = self._fit_ensemble_model(G, T, t, f_exp, weights)
-            else:
-                st.error(f"Неизвестный тип модели: {model_type}")
-                return False
-                
-            if success:
-                self._generate_final_formula()
-                
-            return success
-            
-        except Exception as e:
-            st.error(f"Ошибка при подгонке модели: {e}")
-            return False
+        except np.linalg.LinAlgError:
+            st.error("Ошибка: матрица вырождена. Проверьте данные на мультиколлинеарность.")
+            return None
+        
+        return self
     
-    def _fit_avrami_model(self, G, T, t, f_exp, weights):
-        """Модель Аврами с насыщением и физическими ограничениями"""
-        # Начальные приближения с учетом физики процесса
-        initial_guess = [12.0, 1e12, 250000, 1.2, 0.15]  # f_max, K0, Q, n, alpha
-        
-        # Границы с физическими ограничениями
-        bounds = (
-            [5.0, 1e8, 200000, 0.8, 0.05],   # нижние границы
-            [25.0, 1e16, 350000, 2.5, 0.3]    # верхние границы
-        )
-        
-        def model(params, G, T, t):
-            f_max, K0, Q, n, alpha = params
-            R = 8.314
-            
-            # Эффект размера зерна
-            grain_effect = 1 + alpha * (G - 8)
-            
-            # Константа скорости с учетом энергии активации
-            K = K0 * np.exp(-Q / (R * T)) * grain_effect
-            
-            # Модель Аврами
-            return f_max * (1 - np.exp(-K * (t ** n)))
-        
-        try:
-            self.params, _ = curve_fit(
-                lambda x, f_max, K0, Q, n, alpha: model([f_max, K0, Q, n, alpha], G, T, t),
-                np.arange(len(G)), f_exp,
-                p0=initial_guess,
-                bounds=bounds,
-                maxfev=10000,
-                sigma=1.0/weights  # веса для точек данных
-            )
-            
-            f_pred = model(self.params, G, T, t)
-            self.R2 = r2_score(f_exp, f_pred)
-            self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-            self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
-            
-            return True
-            
-        except Exception as e:
-            st.warning(f"Оптимизация Аврами не сошлась, пробуем упрощенную модель: {e}")
-            return self._fit_simplified_avrami(G, T, t, f_exp, weights)
+    def predict_ln_d(self, X):
+        """Предсказание ln(d)"""
+        return self.intercept_ + X @ self.coef_
     
-    def _fit_simplified_avrami(self, G, T, t, f_exp, weights):
-        """Упрощенная модель Аврами с фиксированными параметрами"""
-        initial_guess = [10.0, 1e10, 220000, 0.1]  # f_max, K0, Q, alpha
-        
-        bounds = (
-            [5.0, 1e8, 180000, 0.05],
-            [20.0, 1e14, 280000, 0.2]
-        )
-        
-        def model(params, G, T, t):
-            f_max, K0, Q, alpha = params
-            R = 8.314
-            grain_effect = 1 + alpha * (G - 8)
-            K = K0 * np.exp(-Q / (R * T)) * grain_effect
-            # Фиксируем n = 1 для упрощения
-            return f_max * (1 - np.exp(-K * t))
-        
-        self.params, _ = curve_fit(
-            lambda x, f_max, K0, Q, alpha: model([f_max, K0, Q, alpha], G, T, t),
-            np.arange(len(G)), f_exp,
-            p0=initial_guess,
-            bounds=bounds,
-            maxfev=5000,
-            sigma=1.0/weights
-        )
-        
-        # Добавляем фиксированный n = 1 к параметрам
-        self.params = np.append(self.params, 1.0)
-        
-        f_pred = model(self.params[:-1], G, T, t)
-        self.R2 = r2_score(f_exp, f_pred)
-        self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-        self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
-        
-        return True
+    def calculate_r2(self, y_true, y_pred):
+        """Расчет коэффициента детерминации R²"""
+        ss_res = np.sum((y_true - y_pred) ** 2)
+        ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+        return 1 - (ss_res / ss_tot)
     
-    def _fit_power_law_model(self, G, T, t, f_exp, weights):
-        """Степенная модель с физическими ограничениями"""
-        initial_guess = [2.0, 0.5, -18000, 0.7, 0.08]  # A, B, C, D, E
-        
-        bounds = (
-            [0.1, 0.0, -30000, 0.3, 0.02],
-            [10.0, 2.0, -12000, 1.5, 0.2]
-        )
-        
-        def model(params, G, T, t):
-            A, B, C, D, E = params
-            R = 8.314
-            # Экспоненциальная зависимость от температуры (обратная)
-            temp_effect = np.exp(C / (R * T))
-            time_effect = t ** D
-            grain_effect = 1 + E * (G - 8)
-            return A * temp_effect * time_effect * grain_effect + B
-        
-        self.params, _ = curve_fit(
-            lambda x, A, B, C, D, E: model([A, B, C, D, E], G, T, t),
-            np.arange(len(G)), f_exp,
-            p0=initial_guess,
-            bounds=bounds,
-            maxfev=5000,
-            sigma=1.0/weights
-        )
-        
-        f_pred = model(self.params, G, T, t)
-        self.R2 = r2_score(f_exp, f_pred)
-        self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-        self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
-        return True
+    def calculate_rmse(self, y_true, y_pred):
+        """Расчет RMSE"""
+        return np.sqrt(np.mean((y_true - y_pred) ** 2))
     
-    def _fit_logistic_model(self, G, T, t, f_exp, weights):
-        """Логистическая модель с насыщением"""
-        initial_guess = [15.0, 1e-6, 2000, 0.12, -15000]  # f_max, k, t0, alpha, beta
-        
-        bounds = (
-            [8.0, 1e-8, 500, 0.05, -25000],
-            [30.0, 1e-4, 5000, 0.25, -8000]
-        )
-        
-        def model(params, G, T, t):
-            f_max, k, t0, alpha, beta = params
-            R = 8.314
-            temp_factor = np.exp(beta / (R * T))
-            grain_factor = 1 + alpha * (G - 8)
-            rate = k * temp_factor * grain_factor
-            return f_max / (1 + np.exp(-rate * (t - t0)))
-        
-        self.params, _ = curve_fit(
-            lambda x, f_max, k, t0, alpha, beta: model([f_max, k, t0, alpha, beta], G, T, t),
-            np.arange(len(G)), f_exp,
-            p0=initial_guess,
-            bounds=bounds,
-            maxfev=5000,
-            sigma=1.0/weights
-        )
-        
-        f_pred = model(self.params, G, T, t)
-        self.R2 = r2_score(f_exp, f_pred)
-        self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-        self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
-        return True
+    def calculate_mae(self, y_true, y_pred):
+        """Расчет MAE"""
+        return np.mean(np.abs(y_true - y_pred))
     
-    def _fit_ensemble_model(self, G, T, t, f_exp, weights):
-        """Ансамблевая модель с приоритетом на рабочий диапазон"""
-        initial_guess = [10.0, 1e10, 220000, 1.0, 0.1, 0.5, -15000]
-        
-        bounds = (
-            [5.0, 1e8, 180000, 0.5, 0.05, 0.1, -25000],
-            [20.0, 1e14, 280000, 1.8, 0.2, 2.0, -8000]
-        )
-        
-        def model(params, G, T, t):
-            f_max, K0, Q, n, alpha, w, beta = params
-            R = 8.314
-            
-            # Аврами компонент (основной)
-            grain_effect_avrami = 1 + alpha * (G - 8)
-            K_avrami = K0 * np.exp(-Q / (R * T)) * grain_effect_avrami
-            f_avrami = f_max * (1 - np.exp(-K_avrami * (t ** n)))
-            
-            # Корректирующий компонент для учета нелинейностей
-            temp_effect_power = np.exp(beta / (R * T))
-            f_power = w * temp_effect_power * (t ** 0.3) * (1 + 0.03 * (G - 8))
-            
-            return f_avrami + f_power
-        
-        self.params, _ = curve_fit(
-            lambda x, f_max, K0, Q, n, alpha, w, beta: model([f_max, K0, Q, n, alpha, w, beta], G, T, t),
-            np.arange(len(G)), f_exp,
-            p0=initial_guess,
-            bounds=bounds,
-            maxfev=15000,
-            sigma=1.0/weights
-        )
-        
-        f_pred = model(self.params, G, T, t)
-        self.R2 = r2_score(f_exp, f_pred)
-        self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-        self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
-        return True
-
-    def _generate_final_formula(self):
-        """Генерация читаемой формулы модели"""
-        if self.params is None:
-            self.final_formula = "Модель не обучена"
-            return
-            
-        if self.model_type == "avrami_saturation":
-            f_max, K0, Q, n, alpha = self.params
-            self.final_formula = f"""
-**Модель Аврами с насыщением:**
-            f(G, T, t) = {f_max:.3f} × [1 - exp(-K × t^{n:.3f})]
-K = {K0:.3e} × exp(-{Q/1000:.1f} кДж/моль / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
-            """
-        elif self.model_type == "power_law":
-            A, B, C, D, E = self.params
-            self.final_formula = f"""
-**Степенная модель:**
-            f(G, T, t) = {A:.3f} × exp({C:.0f} / (R × T)) × t^{D:.3f} × [1 + {E:.3f} × (G - 8)] + {B:.3f}
-            """
-        elif self.model_type == "logistic":
-            f_max, k, t0, alpha, beta = self.params
-            self.final_formula = f"""
-**Логистическая модель:**
-            f(G, T, t) = {f_max:.3f} / [1 + exp(-k × (t - {t0:.0f}))]
-k = {k:.3e} × exp({beta:.0f} / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
-            """
-        elif self.model_type == "ensemble":
-            f_max, K0, Q, n, alpha, w, beta = self.params
-            self.final_formula = f"""
-**Ансамблевая модель:**
-            f(G, T, t) = f_avrami + f_power
-
-f_avrami = {f_max:.3f} × [1 - exp(-K_avrami × t^{n:.3f})]
-K_avrami = {K0:.3e} × exp(-{Q/1000:.1f} кДж/моль / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
-
-f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.3 × [1 + 0.03 × (G - 8)]
-            """
-      
-        self.final_formula += "\n**R = 8.314 Дж/(моль·К) - универсальная газовая постоянная**\n**T - температура в Кельвинах (T[°C] + 273.15)**"
-    
-    def predict_temperature(self, G, sigma_percent, t):
-        """Предсказание температуры с физическими ограничениями"""
-        if self.params is None:
+    def predict_temperature(self, d_sigma, time_hours, grain_size):
+        """Предсказание температуры по модели"""
+        if self.coef_ is None:
             raise ValueError("Модель не обучена!")
-        
-        sigma = sigma_percent
-        
-        # Бисекционный поиск в рабочем диапазоне 580-630°C
-        T_min, T_max = 580, 630
-        
-        for i in range(50):  # уменьшили количество итераций для скорости
-            T_mid = (T_min + T_max) / 2
-            f_pred = self._evaluate_model(G, T_mid, t)
             
-            if abs(f_pred - sigma) < 0.5:  # более строгая точность
-                return T_mid
+        # Получаем данные по зерну
+        grain_info = grain_df[grain_df['G'] == grain_size]
+        if len(grain_info) == 0:
+            raise ValueError(f"Номер зерна {grain_size} не найден в базе данных")
             
-            if f_pred < sigma:
-                T_min = T_mid
-            else:
-                T_max = T_mid
+        ln_inv_sqrt_a_v = grain_info['ln_inv_sqrt_a_v'].iloc[0]
         
-        # Если не сошлось в рабочем диапазоне, расширяем поиск
-        final_T = (T_min + T_max) / 2
+        # Расчет по модели: ln(d_σ) = β₀ + β₁×ln(t) + β₂×(1/T) + β₃×ln(1/√a_v)
+        # Преобразуем для получения температуры: 1/T = [ln(d_σ) - β₀ - β₁×ln(t) - β₃×ln(1/√a_v)] / β₂
+        ln_d_sigma = np.log(d_sigma)
+        ln_time = np.log(time_hours)
         
-        # Проверяем физические ограничения
-        if final_T < 550:
-            st.warning("⚠️ Расчетная температура ниже физического предела образования сигма-фазы (550°C)")
-            return 550
-        elif final_T > 700:
-            st.warning("⚠️ Расчетная температура выше типичного диапазона для стали 12Х18Н12Т")
-            return 700
-            
-        return final_T
-    
-    def _evaluate_model(self, G, T, t):
-        """Вычисление модели для данных параметров"""
-        if self.params is None:
-            return 0.0
-            
-        T_kelvin = T + 273.15
+        numerator = ln_d_sigma - self.intercept_ - self.coef_[0] * ln_time - self.coef_[2] * ln_inv_sqrt_a_v
+        inv_T = numerator / self.coef_[1]
         
-        if self.model_type == "avrami_saturation":
-            f_max, K0, Q, n, alpha = self.params
-            R = 8.314
-            grain_effect = 1 + alpha * (G - 8)
-            K = K0 * np.exp(-Q / (R * T_kelvin)) * grain_effect
-            return f_max * (1 - np.exp(-K * (t ** n)))
+        T_kelvin = 1 / inv_T
+        T_celsius = T_kelvin - 273.15
         
-        elif self.model_type == "power_law":
-            A, B, C, D, E = self.params
-            R = 8.314
-            temp_effect = np.exp(C / (R * T_kelvin))
-            time_effect = t ** D
-            grain_effect = 1 + E * (G - 8)
-            return A * temp_effect * time_effect * grain_effect + B
-        
-        elif self.model_type == "logistic":
-            f_max, k, t0, alpha, beta = self.params
-            R = 8.314
-            temp_factor = np.exp(beta / (R * T_kelvin))
-            grain_factor = 1 + alpha * (G - 8)
-            rate = k * temp_factor * grain_factor
-            return f_max / (1 + np.exp(-rate * (t - t0)))
-        
-        elif self.model_type == "ensemble":
-            f_max, K0, Q, n, alpha, w, beta = self.params
-            R = 8.314
-            
-            grain_effect_avrami = 1 + alpha * (G - 8)
-            K_avrami = K0 * np.exp(-Q / (R * T_kelvin)) * grain_effect_avrami
-            f_avrami = f_max * (1 - np.exp(-K_avrami * (t ** n)))
-            
-            temp_effect_power = np.exp(beta / (R * T_kelvin))
-            f_power = w * temp_effect_power * (t ** 0.3) * (1 + 0.03 * (G - 8))
-            
-            return f_avrami + f_power
-        
-        return 0.0
-    
-    def calculate_validation_metrics(self, data):
-        """Расчет метрик валидации"""
-        if self.params is None:
-            return None
-        
-        G = data['G'].values
-        T = data['T'].values
-        t = data['t'].values
-        f_exp = data['f_exp (%)'].values
-        
-        f_pred = np.array([self._evaluate_model(g, temp, time) for g, temp, time in zip(G, T, t)])
-        
-        residuals = f_pred - f_exp
-        relative_errors = (residuals / np.maximum(f_exp, 0.1)) * 100
-        
-        valid_mask = np.isfinite(relative_errors) & (f_exp > 0.1)
-        f_exp_valid = f_exp[valid_mask]
-        f_pred_valid = f_pred[valid_mask]
-        residuals_valid = residuals[valid_mask]
-        relative_errors_valid = relative_errors[valid_mask]
-        
-        if len(f_exp_valid) == 0:
-            return None
-            
-        mae = np.mean(np.abs(residuals_valid))
-        rmse = np.sqrt(mean_squared_error(f_exp_valid, f_pred_valid))
-        mape = np.mean(np.abs(relative_errors_valid))
-        r2 = r2_score(f_exp_valid, f_pred_valid)
-        
-        validation_results = {
-            'data': data.copy(),
-            'predictions': f_pred,
-            'residuals': residuals,
-            'relative_errors': relative_errors,
-            'metrics': {
-                'MAE': mae,
-                'RMSE': rmse,
-                'MAPE': mape,
-                'R2': r2
-            }
-        }
-        
-        return validation_results
+        return T_celsius
 
-    def calculate_working_range_metrics(self, data):
-        """Специальные метрики для рабочего диапазона 580-630°C"""
-        if self.params is None:
-            return None
-        
-        working_data = data[(data['T'] >= 580) & (data['T'] <= 630)]
-        
-        if len(working_data) == 0:
-            return None
-            
-        G = working_data['G'].values
-        T = working_data['T'].values
-        t = working_data['t'].values
-        f_exp = working_data['f_exp (%)'].values
-        
-        f_pred = np.array([self._evaluate_model(g, temp, time) for g, temp, time in zip(G, T, t)])
-        
-        residuals = f_pred - f_exp
-        relative_errors = (residuals / np.maximum(f_exp, 0.1)) * 100
-        
-        working_metrics = {
-            'MAE': np.mean(np.abs(residuals)),
-            'RMSE': np.sqrt(mean_squared_error(f_exp, f_pred)),
-            'MAPE': np.mean(np.abs(relative_errors)),
-            'R2': r2_score(f_exp, f_pred),
-            'MaxError': np.max(np.abs(residuals)),
-            'DataPoints': len(working_data)
-        }
-        
-        return working_metrics
-
-def read_uploaded_file(uploaded_file):
-    """Чтение загруженного файла"""
+def read_excel_file(uploaded_file):
+    """Чтение Excel файла с обработкой различных форматов"""
     try:
-        # Сначала пробуем стандартное чтение
-        if uploaded_file.name.endswith('.csv'):
+        # Пробуем разные способы чтения
+        try:
+            df = pd.read_excel(uploaded_file, engine='openpyxl')
+            return df
+        except Exception as e:
+            st.warning(f"Не удалось прочитать с openpyxl: {e}. Пробуем другой способ...")
             try:
-                data = pd.read_csv(uploaded_file, decimal=',', encoding='utf-8')
+                df = pd.read_excel(uploaded_file, engine='xlrd')
+                return df
             except:
-                try:
-                    data = pd.read_csv(uploaded_file, decimal=',', encoding='cp1251')
-                except:
-                    data = pd.read_csv(uploaded_file, decimal='.', encoding='utf-8')
-        else:
-            try:
-                # Пробуем прочитать как простой файл
-                if uploaded_file.name.endswith('.xlsx'):
-                    data = pd.read_excel(uploaded_file, engine='openpyxl')
-                else:
-                    data = pd.read_excel(uploaded_file, engine='xlrd')
-                
-                # СНАЧАЛА проверяем что данные загрузились
-                if data is not None and len(data) > 0:
-                    # ТЕПЕРЬ нормализуем названия колонок
-                    data_normalized = DataValidator.normalize_column_names(data)
-                    # Проверяем есть ли нужные колонки после нормализации
-                    if not all(col in data_normalized.columns for col in ['G', 'T', 't', 'f_exp (%)']):
-                        # Если нет нужных колонок, пробуем парсить как сложный файл
-                        st.warning("⚠️ Обнаружен сложный формат данных. Применяем специальный парсер...")
-                        data = ComplexDataParser.extract_all_data(uploaded_file)
-                    else:
-                        data = data_normalized
-                else:
-                    # Если данные пустые, пробуем сложный парсер
-                    st.warning("⚠️ Данные не загрузились. Пробуем специальный парсер...")
-                    data = ComplexDataParser.extract_all_data(uploaded_file)
-                    
-            except Exception as e:
-                st.warning(f"⚠️ Стандартное чтение не удалось: {e}. Пробуем специальный парсер...")
-                data = ComplexDataParser.extract_all_data(uploaded_file)
-        
-        return data
-        
+                # Последняя попытка - без указания движка
+                df = pd.read_excel(uploaded_file)
+                return df
     except Exception as e:
-        st.error(f"❌ Ошибка чтения файла: {e}")
+        st.error(f"Не удалось прочитать файл. Убедитесь, что это корректный Excel файл.")
         return None
 
-def main():
-    # Инициализация сессии
-    if 'analyzer' not in st.session_state:
-        st.session_state.analyzer = None
-    if 'current_data' not in st.session_state:
-        st.session_state.current_data = None
-    if 'validation_results' not in st.session_state:
-        st.session_state.validation_results = None
-    if 'excluded_points' not in st.session_state:
-        st.session_state.excluded_points = set()
-    if 'selected_model' not in st.session_state:
-        st.session_state.selected_model = "ensemble"
+def prepare_data(df, excluded_indices=[]):
+    """Подготовка данных для регрессии"""
+    df_clean = df.drop(excluded_indices).copy()
     
-    # Создание вкладок
-    tab1, tab2, tab3 = st.tabs(["📊 Данные и модель", "🧮 Калькулятор", "📈 Валидация модели"])
+    # Фильтруем нулевые и отрицательные значения
+    df_clean = df_clean[df_clean['d'] > 0].copy()
     
-    # Боковая панель
-    st.sidebar.header("🎯 Настройки модели")
+    # Добавляем данные по зернам
+    df_clean = df_clean.merge(grain_df[['G', 'ln_inv_sqrt_a_v']], on='G', how='left')
     
-    # Выбор модели
-    model_type = st.sidebar.selectbox(
-        "Выберите модель",
-        ["avrami_saturation", "power_law", "logistic", "ensemble"],
-        format_func=lambda x: {
-            "avrami_saturation": "Аврами с насыщением",
-            "power_law": "Степенная модель",
-            "logistic": "Логистическая модель", 
-            "ensemble": "Ансамблевая модель"
-        }[x],
-        key="model_selector"
-    )
+    # Преобразуем переменные
+    df_clean['ln_d'] = np.log(df_clean['d'])
+    df_clean['ln_t'] = np.log(df_clean['t'])
+    df_clean['inv_T'] = 1 / (df_clean['T'] + 273.15)  # T в Кельвинах
     
-    # Пример данных
-    sample_data = pd.DataFrame({
-        'G': [8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
-        'T': [600, 600, 600, 600, 650, 650, 650, 650, 600, 600, 600, 600, 650, 650, 650, 650, 600, 600, 600, 600, 650, 650, 650, 650, 700, 700],
-        't': [2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000],
-        'f_exp (%)': [1.76, 0.68, 0.94, 1.09, 0.67, 1.2, 1.48, 1.13, 0.87, 1.28, 2.83, 3.25, 1.88, 2.29, 3.25, 2.89, 1.261, 2.04, 2.38, 3.3, 3.2, 4.26, 5.069, 5.41, 3.3, 5.0]
+    # Создаем матрицу признаков
+    X = df_clean[['ln_t', 'inv_T', 'ln_inv_sqrt_a_v']].values
+    y = df_clean['ln_d'].values
+    
+    return X, y, df_clean
+
+def create_validation_charts(df_clean, y, y_pred):
+    """Создание графиков валидации с использованием Altair"""
+    
+    # Данные для графиков
+    plot_data = pd.DataFrame({
+        'actual': np.exp(y),
+        'predicted': np.exp(y_pred),
+        'residuals': np.exp(y) - np.exp(y_pred),
+        'temperature': df_clean['T'],
+        'grain_size': df_clean['G'],
+        'time': df_clean['t']
     })
     
-    # Загрузка данных
-    st.sidebar.header("📊 Загрузка данных")
-    
-    uploaded_file = st.sidebar.file_uploader(
-        "Загрузите файл с экспериментальными данными",
-        type=['csv', 'xlsx', 'xls']
+    # График 1: Предсказанные vs Фактические значения
+    chart1 = alt.Chart(plot_data).mark_circle(size=60).encode(
+        x=alt.X('actual:Q', title='Фактический диаметр (мкм²)'),
+        y=alt.Y('predicted:Q', title='Предсказанный диаметр (мкм²)'),
+        color='temperature:Q',
+        tooltip=['actual', 'predicted', 'temperature', 'grain_size', 'time']
+    ).properties(
+        width=400,
+        height=300,
+        title='Предсказанные vs Фактические значения'
     )
     
-    # Кнопка для принудительного парсинга сложных файлов
-    if uploaded_file is not None and uploaded_file.name.endswith(('.xlsx', '.xls')):
-        if st.sidebar.button("🔧 Принудительный парсинг сложного файла"):
-            with st.spinner("Парсим сложную структуру файла..."):
-                data = ComplexDataParser.extract_all_data(uploaded_file)
-                if data is not None and len(data) > 0:
-                    data = DataValidator.normalize_column_names(data)
-                    is_valid, message = DataValidator.validate_data(data)
-                    if is_valid:
-                        data['f_exp (%)'] = data['f_exp (%)'].round(3)
-                        st.session_state.current_data = data
-                        st.sidebar.success(f"✅ Извлечено {len(data)} записей!")
-                        st.rerun()
-                else:
-                    st.sidebar.error("❌ Не удалось извлечь данные из файла")
+    # Линия идеального предсказания
+    min_val = plot_data[['actual', 'predicted']].min().min()
+    max_val = plot_data[['actual', 'predicted']].max().max()
+    line_data = pd.DataFrame({
+        'x': [min_val, max_val],
+        'y': [min_val, max_val]
+    })
+    
+    line = alt.Chart(line_data).mark_line(color='red', strokeDash=[5,5]).encode(
+        x='x:Q',
+        y='y:Q'
+    )
+    
+    chart1 = chart1 + line
+    
+    # График 2: Остатки
+    chart2 = alt.Chart(plot_data).mark_circle(size=60).encode(
+        x=alt.X('predicted:Q', title='Предсказанный диаметр (мкм²)'),
+        y=alt.Y('residuals:Q', title='Остатки'),
+        color='temperature:Q',
+        tooltip=['predicted', 'residuals', 'temperature']
+    ).properties(
+        width=400,
+        height=300,
+        title='Остатки модели'
+    )
+    
+    zero_line = alt.Chart(pd.DataFrame({'y': [0]})).mark_rule(color='red', strokeDash=[5,5]).encode(y='y:Q')
+    chart2 = chart2 + zero_line
+    
+    # График 3: Распределение ошибок
+    chart3 = alt.Chart(plot_data).mark_bar().encode(
+        x=alt.X('residuals:Q', bin=alt.Bin(maxbins=15), title='Ошибка предсказания'),
+        y=alt.Y('count()', title='Частота')
+    ).properties(
+        width=400,
+        height=300,
+        title='Распределение ошибок'
+    )
+    
+    return chart1, chart2, chart3
 
-    # ОСНОВНАЯ ЗАГРУЗКА
-    if uploaded_file is not None:
-        data = read_uploaded_file(uploaded_file)
-        if data is not None and len(data) > 0:
-            # Нормализуем названия колонок ЕСЛИ еще не нормализованы
-            if 'G' not in data.columns or 'T' not in data.columns or 't' not in data.columns or 'f_exp (%)' not in data.columns:
-                data = DataValidator.normalize_column_names(data)
-            
-            is_valid, message = DataValidator.validate_data(data)
-            if is_valid:
-                data['f_exp (%)'] = data['f_exp (%)'].round(3)
-                st.session_state.current_data = data
-                st.sidebar.success("✅ Данные успешно загружены!")
-            else:
-                st.sidebar.error(f"❌ Ошибка валидации: {message}")
-        else:
-            st.sidebar.error("❌ Не удалось загрузить данные из файла")
-
-    if st.session_state.current_data is None:
-        st.session_state.current_data = sample_data
-
-    # ВКЛАДКА 1: Данные и модель
+def main():
+    st.set_page_config(page_title="Sigma Phase Analyzer", layout="wide")
+    st.title("🔬 Анализатор сигма-фазы в стали 12Х18Н12Т")
+    
+    # Создаем вкладки
+    tab1, tab2 = st.tabs(["📊 Анализ данных и калибровка модели", "🧮 Калькулятор температуры"])
+    
     with tab1:
-        st.header("📊 Управление данными")
+        st.header("Калибровка физической модели")
         
-        st.info("💡 **Снимите галочки с точек, которые хотите исключить из анализа**")
+        # Загрузка данных
+        st.subheader("1. Загрузка данных")
+        uploaded_file = st.file_uploader("Загрузите Excel файл с данными", type=['xlsx', 'xls'])
         
-        # Создаем копию данных с чекбоксами
-        display_data = st.session_state.current_data.copy()
-        display_data['№'] = range(1, len(display_data) + 1)
-        display_data['Использовать'] = [i not in st.session_state.excluded_points for i in range(len(display_data))]
-        
-        # Показываем таблицу с чекбоксами
-        edited_df = st.data_editor(
-            display_data,
-            column_config={
-                "№": st.column_config.NumberColumn(width="small"),
-                "Использовать": st.column_config.CheckboxColumn(
-                    width="small",
-                    help="Снимите галочку чтобы исключить точку"
-                ),
-                "G": st.column_config.NumberColumn(width="small"),
-                "T": st.column_config.NumberColumn(width="small"),
-                "t": st.column_config.NumberColumn(width="small"),
-                "f_exp (%)": st.column_config.NumberColumn(format="%.3f", width="small")
-            },
-            column_order=["№", "Использовать", "G", "T", "t", "f_exp (%)"],
-            use_container_width=True,
-            height=400
-        )
-        
-        # Обновляем список исключенных точек
-        new_excluded = set()
-        for i, used in enumerate(edited_df['Использовать']):
-            if not used:
-                new_excluded.add(i)
-        
-        if new_excluded != st.session_state.excluded_points:
-            st.session_state.excluded_points = new_excluded
-            st.session_state.analyzer = None
-            st.session_state.validation_results = None
-        
-        # Статистика
-        total = len(display_data)
-        excluded = len(st.session_state.excluded_points)
-        included = total - excluded
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Всего точек", total)
-        col2.metric("Используется", included, delta=f"-{excluded}" if excluded > 0 else None)
-        col3.metric("Исключено", excluded)
-        
-        if excluded > 0:
-            st.warning(f"Исключенные точки: {[i+1 for i in sorted(st.session_state.excluded_points)]}")
-            if st.button("🔄 Включить все точки"):
-                st.session_state.excluded_points = set()
-                st.rerun()
-        
-        # Подготовка данных для анализа
-        analysis_data = st.session_state.current_data.copy()
-        if st.session_state.excluded_points:
-            analysis_data = analysis_data.drop(list(st.session_state.excluded_points)).reset_index(drop=True)
-        
-        # Подбор модели
-        st.header("🎯 Подбор параметров модели")
-        
-        model_names = {
-            'avrami_saturation': 'Аврами с насыщением', 
-            'power_law': 'Степенная', 
-            'logistic': 'Логистическая', 
-            'ensemble': 'Ансамблевая'
-        }
-        st.write(f"**Выбрана модель:** {model_names[model_type]}")
-        
-        if st.button("🚀 Обучить модель", type="primary", use_container_width=True):
-            if len(analysis_data) < 5:
-                st.error("❌ Слишком мало данных для обучения. Нужно как минимум 5 точек.")
-            else:
-                analyzer = SigmaPhaseAnalyzer()
-                with st.spinner("Подбираем параметры модели..."):
-                    success = analyzer.fit_model(analysis_data, model_type)
+        if uploaded_file is not None:
+            try:
+                df = read_excel_file(uploaded_file)
                 
-                if success:
-                    st.session_state.analyzer = analyzer
-                    validation_results = analyzer.calculate_validation_metrics(analysis_data)
-                    st.session_state.validation_results = validation_results
-                    st.success(f"✅ Модель обучена! R² = {analyzer.R2:.4f}")
-                    st.rerun()
-        
-        # Показ результатов
-        if st.session_state.analyzer is not None:
-            analyzer = st.session_state.analyzer
-            
-            st.subheader("📈 Параметры модели")
-            if analyzer.model_type == "ensemble":
-                f_max, K0, Q, n, alpha, w, beta = analyzer.params
-                cols = st.columns(4)
-                cols[0].metric("f_max", f"{f_max:.3f}%")
-                cols[1].metric("K₀", f"{K0:.2e}")
-                cols[2].metric("Q", f"{Q/1000:.1f} кДж/моль")
-                cols[3].metric("n", f"{n:.3f}")
-                cols[0].metric("α", f"{alpha:.3f}")
-                cols[1].metric("w", f"{w:.3f}")
-                cols[2].metric("β", f"{beta:.0f}")
-            
-            st.subheader("📊 Метрики качества")
-            col1, col2 = st.columns(2)
-            col1.metric("R²", f"{analyzer.R2:.4f}")
-            col2.metric("RMSE", f"{analyzer.rmse:.3f}%")
-            
-            # Метрики для рабочего диапазона
-            st.subheader("📊 Метрики в рабочем диапазоне (580-630°C)")
-            working_metrics = analyzer.calculate_working_range_metrics(analysis_data)
-            
-            if working_metrics:
-                cols = st.columns(3)
-                cols[0].metric("Точек в диапазоне", working_metrics['DataPoints'])
-                cols[1].metric("R² рабоч.", f"{working_metrics['R2']:.4f}")
-                cols[2].metric("RMSE рабоч.", f"{working_metrics['RMSE']:.3f}%")
-            else:
-                st.info("Нет данных в рабочем диапазоне 580-630°C для расчета метрик")
-            
-            st.subheader("🧮 Формула модели")
-            st.markdown(analyzer.final_formula)
+                if df is None:
+                    st.stop()
+                
+                required_columns = ['G', 'T', 't', 'd']
+                
+                if all(col in df.columns for col in required_columns):
+                    st.success("✅ Данные успешно загружены!")
+                    
+                    # Показываем статистику
+                    st.subheader("Статистика данных")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Количество измерений", len(df))
+                    with col2:
+                        st.metric("Диапазон температур", f"{df['T'].min()} - {df['T'].max()} °C")
+                    with col3:
+                        st.metric("Диапазон времени", f"{df['t'].min()} - {df['t'].max()} ч")
+                    with col4:
+                        st.metric("Номера зерен", ", ".join(map(str, sorted(df['G'].unique()))))
+                    
+                    # Показываем данные
+                    with st.expander("📋 Просмотр данных"):
+                        st.dataframe(df)
+                    
+                    # Выбор данных для исключения
+                    st.subheader("2. Выбор данных для исключения")
+                    st.write("Исключите выбросы для улучшения модели:")
+                    
+                    excluded_indices = []
+                    
+                    for idx, row in df.iterrows():
+                        col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
+                        with col1:
+                            st.write(f"**{idx+1}**")
+                        with col2:
+                            st.write(f"G={row['G']}")
+                        with col3:
+                            st.write(f"T={row['T']}°C")
+                        with col4:
+                            st.write(f"t={row['t']}ч")
+                        with col5:
+                            if st.checkbox("Исключить", key=f"exclude_{idx}"):
+                                excluded_indices.append(idx)
+                    
+                    st.info(f"Исключено точек: {len(excluded_indices)}")
+                    
+                    # Обучение модели
+                    st.subheader("3. Обучение модели")
+                    if len(df) - len(excluded_indices) >= 4:  # Минимум 4 точки для регрессии
+                        try:
+                            X, y, df_clean = prepare_data(df, excluded_indices)
+                            
+                            if len(df_clean) == 0:
+                                st.error("Нет данных для обучения после фильтрации. Проверьте, что все значения d > 0.")
+                                st.stop()
+                            
+                            model = SigmaPhaseModel()
+                            result = model.fit(X, y)
+                            
+                            if result is None:
+                                st.error("Не удалось обучить модель. Проверьте данные.")
+                                return
+                            
+                            # Предсказания
+                            y_pred = model.predict_ln_d(X)
+                            df_clean['d_pred'] = np.exp(y_pred)
+                            
+                            # Показываем коэффициенты модели
+                            st.subheader("Коэффициенты модели")
+                            st.latex(r"ln(d) = \beta_0 + \beta_1 \cdot ln(t) + \beta_2 \cdot \frac{1}{T} + \beta_3 \cdot ln\left(\frac{1}{\sqrt{a_v}}\right)")
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric("β₀ (intercept)", f"{model.intercept_:.6f}")
+                                st.metric("β₁ (ln(t))", f"{model.coef_[0]:.6f}")
+                            with col2:
+                                st.metric("β₂ (1/T)", f"{model.coef_[1]:.6f}")
+                                st.metric("β₃ (ln(1/√a_v))", f"{model.coef_[2]:.6f}")
+                            with col3:
+                                st.metric("Энергия активации Q", f"{-2 * 8.314 * model.coef_[1]:.1f} Дж/моль")
+                            
+                            # Метрики качества
+                            st.subheader("Метрики качества модели")
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.metric("R²", f"{model.r2:.4f}")
+                            with col2:
+                                st.metric("RMSE", f"{model.rmse:.4f}")
+                            with col3:
+                                st.metric("MAE", f"{model.mae:.4f}")
+                            with col4:
+                                st.metric("Точек обучения", f"{len(df_clean)}")
+                            
+                            # Графики валидации
+                            st.subheader("4. Валидация модели")
+                            chart1, chart2, chart3 = create_validation_charts(df_clean, y, y_pred)
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.altair_chart(chart1, use_container_width=True)
+                                st.altair_chart(chart3, use_container_width=True)
+                            with col2:
+                                st.altair_chart(chart2, use_container_width=True)
+                                
+                                # График ошибок по температурам
+                                error_by_temp = df_clean.groupby('T').apply(
+                                    lambda x: (x['d'] - x['d_pred']).mean()
+                                ).reset_index()
+                                error_by_temp.columns = ['T', 'mean_error']
+                                
+                                chart4 = alt.Chart(error_by_temp).mark_bar().encode(
+                                    x=alt.X('T:Q', title='Температура (°C)'),
+                                    y=alt.Y('mean_error:Q', title='Средняя ошибка'),
+                                    tooltip=['T', 'mean_error']
+                                ).properties(
+                                    height=300,
+                                    title='Средняя ошибка по температурам'
+                                )
+                                st.altair_chart(chart4, use_container_width=True)
+                            
+                            # Таблица с сравнением
+                            st.subheader("Сравнение экспериментальных и расчетных значений")
+                            comparison_df = df_clean[['G', 'T', 't', 'd', 'd_pred']].copy()
+                            comparison_df['Ошибка, %'] = 100 * (comparison_df['d_pred'] - comparison_df['d']) / comparison_df['d']
+                            comparison_df['d'] = comparison_df['d'].round(4)
+                            comparison_df['d_pred'] = comparison_df['d_pred'].round(4)
+                            comparison_df['Ошибка, %'] = comparison_df['Ошибка, %'].round(2)
+                            
+                            st.dataframe(comparison_df)
+                            
+                            # Сохранение модели в сессии
+                            st.session_state['trained_model'] = model
+                            st.session_state['model_coef'] = model.coef_
+                            st.session_state['model_intercept'] = model.intercept_
+                            
+                            # Экспорт параметров модели
+                            st.subheader("5. Параметры модели для использования")
+                            st.code(f"""
+МОДЕЛЬ РОСТА СИГМА-ФАЗЫ
+Уравнение: ln(d) = β₀ + β₁·ln(t) + β₂·(1/T) + β₃·ln(1/√a_v)
 
-    # ВКЛАДКА 2: Калькулятор
+ПАРАМЕТРЫ:
+β₀ = {model.intercept_:.8f}
+β₁ = {model.coef_[0]:.8f}  
+β₂ = {model.coef_[1]:.8f}
+β₃ = {model.coef_[2]:.8f}
+
+ФОРМУЛА ДЛЯ РАСЧЕТА ТЕМПЕРАТУРЫ:
+T [°C] = β₂ / [ln(d) - β₀ - β₁·ln(t) - β₃·ln(1/√a_v)] - 273.15
+
+Энергия активации: {-2 * 8.314 * model.coef_[1]:.1f} Дж/моль
+Качество модели: R² = {model.r2:.4f}
+                            """)
+                            
+                        except Exception as e:
+                            st.error(f"Ошибка при обучении модели: {str(e)}")
+                    else:
+                        st.warning("⚠️ Недостаточно данных для обучения модели. Нужно минимум 4 измерения.")
+                        
+                else:
+                    missing_cols = [col for col in required_columns if col not in df.columns]
+                    st.error(f"❌ В файле отсутствуют столбцы: {missing_cols}")
+                    
+            except Exception as e:
+                st.error(f"❌ Ошибка при чтении файла: {str(e)}")
+        else:
+            st.info("📁 Загрузите Excel файл с колонками: G, T, t, d")
+            
+            # Пример данных
+            with st.expander("📋 Пример формата данных"):
+                example_data = pd.DataFrame({
+                    'G': [3, 5, 8, 9],
+                    'T': [600, 650, 700, 600],
+                    't': [2000, 4000, 6000, 8000],
+                    'd': [5.2, 8.7, 12.3, 6.8]
+                })
+                st.dataframe(example_data)
+                st.write("**G** - номер зерна, **T** - температура (°C), **t** - время (ч), **d** - диаметр (мкм²)")
+    
     with tab2:
-        st.header("🧮 Калькулятор температуры")
+        st.header("🧮 Калькулятор температуры эксплуатации")
         
-        if st.session_state.analyzer is not None:
-            analyzer = st.session_state.analyzer
+        if 'trained_model' in st.session_state:
+            model = st.session_state['trained_model']
+            
+            st.success("✅ Модель готова к использованию!")
+            st.write("Введите параметры для расчета температуры:")
             
             col1, col2, col3 = st.columns(3)
-            with col1:
-                G_input = st.number_input("Номер зерна (G)", value=8.0, min_value=-3.0, max_value=14.0, step=0.1)
-            with col2:
-                sigma_input = st.number_input("Содержание сигма-фазы (%)", value=2.0, min_value=0.1, max_value=20.0, step=0.1)
-            with col3:
-                t_input = st.number_input("Время (ч)", value=4000, min_value=100, max_value=500000, step=100)
             
-            if st.button("🔍 Рассчитать температуру", use_container_width=True):
+            with col1:
+                grain_number = st.selectbox("Номер зерна (G)", options=grain_df['G'].tolist())
+            with col2:
+                time_hours = st.number_input("Время эксплуатации (ч)", min_value=1, value=5000, step=100)
+            with col3:
+                d_sigma = st.number_input("Эквивалентный диаметр сигма-фазы (мкм²)", 
+                                        min_value=0.1, value=10.0, step=0.1)
+            
+            if st.button("🎯 Рассчитать температуру", type="primary"):
                 try:
-                    T_pred = analyzer.predict_temperature(G_input, sigma_input, t_input)
+                    temperature = model.predict_temperature(d_sigma, time_hours, grain_number)
                     
-                    # Оценка достоверности предсказания
-                    if 580 <= T_pred <= 630:
-                        st.success(f"**Расчетная температура эксплуатации:** {T_pred:.1f}°C")
-                        st.info("✅ Температура в оптимальном рабочем диапазоне")
-                    elif 550 <= T_pred < 580:
-                        st.success(f"**Расчетная температура эксплуатации:** {T_pred:.1f}°C")
-                        st.warning("⚠️ Температура близка к нижнему пределу образования сигма-фазы")
+                    # Проверка диапазона работоспособности
+                    if temperature < 550:
+                        st.error(f"""
+                        ⚠️ **Рассчитанная температура: {temperature:.1f} °C**
+                        
+                        **Внимание:** Температура ниже 550°C - сигма-фаза практически не выделяется
+                        """)
+                    elif temperature > 900:
+                        st.error(f"""
+                        ⚠️ **Рассчитанная температура: {temperature:.1f} °C**
+                        
+                        **Внимание:** Температура выше 900°C - сигма-фаза не выделяется
+                        """)
+                    elif 590 <= temperature <= 630:
+                        st.success(f"""
+                        ✅ **Оптимальный диапазон: {temperature:.1f} °C**
+                        
+                        **Модель работает с максимальной точностью**
+                        """)
                     else:
-                        st.success(f"**Расчетная температура эксплуатации:** {T_pred:.1f}°C")
-                        st.warning("⚠️ Температура вне типичного рабочего диапазона")
+                        st.warning(f"""
+                        📊 **Рассчитанная температура: {temperature:.1f} °C**
+                        
+                        **Внимание:** Температура вне оптимального диапазона 590-630°C
+                        """)
+                    
+                    # Дополнительная информация
+                    with st.expander("🔍 Детали расчета"):
+                        grain_info = grain_df[grain_df['G'] == grain_number].iloc[0]
+                        st.write(f"**Параметры зерна №{grain_number}:**")
+                        st.write(f"- Средняя площадь сечения: {grain_info['a_v']:.6f} мм²")
+                        st.write(f"- Средний диаметр: {grain_info['d_av']:.3f} мм")
+                        st.write(f"- ln(1/√a_v) = {grain_info['ln_inv_sqrt_a_v']:.4f}")
                         
                 except Exception as e:
-                    st.error(f"Ошибка расчета: {e}")
+                    st.error(f"❌ Ошибка при расчете: {str(e)}")
         else:
-            st.info("👆 Сначала обучите модель на вкладке 'Данные и модель'")
-
-    # ВКЛАДКА 3: Валидация
-    with tab3:
-        st.header("📈 Валидация модели")
-        
-        if st.session_state.analyzer is not None and st.session_state.validation_results is not None:
-            analyzer = st.session_state.analyzer
-            validation = st.session_state.validation_results
-            
-            # Метрики
-            metrics = validation['metrics']
-            st.subheader("📊 Метрики качества")
-            cols = st.columns(4)
-            cols[0].metric("R²", f"{metrics['R2']:.4f}")
-            cols[1].metric("MAE", f"{metrics['MAE']:.3f}%")
-            cols[2].metric("RMSE", f"{metrics['RMSE']:.3f}%")
-            cols[3].metric("MAPE", f"{metrics['MAPE']:.2f}%")
-            
-            # График
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(
-                x=validation['data']['f_exp (%)'],
-                y=validation['predictions'],
-                mode='markers',
-                name='Предсказания',
-                marker=dict(size=10, color='blue')
-            ))
-            max_val = max(validation['data']['f_exp (%)'].max(), validation['predictions'].max())
-            fig.add_trace(go.Scatter(
-                x=[0, max_val], y=[0, max_val],
-                mode='lines',
-                name='Идеально',
-                line=dict(color='red', dash='dash')
-            ))
-            fig.update_layout(
-                title='Предсказание vs Эксперимент',
-                xaxis_title='Эксперимент (%)',
-                yaxis_title='Модель (%)'
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Таблица
-            st.subheader("📋 Детальное сравнение")
-            comp_df = validation['data'].copy()
-            comp_df['f_pred (%)'] = validation['predictions'].round(3)
-            comp_df['Ошибка (%)'] = validation['residuals'].round(3)
-            comp_df['Отн. ошибка (%)'] = validation['relative_errors'].round(1)
-            st.dataframe(comp_df, use_container_width=True)
-            
-        else:
-            st.info("👆 Сначала обучите модель на вкладке 'Данные и модель'")
+            st.warning("📊 Сначала обучите модель во вкладке 'Анализ данных'")
 
 if __name__ == "__main__":
     main()

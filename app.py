@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import altair as alt
+from scipy.optimize import curve_fit
 import io
 import warnings
 warnings.filterwarnings('ignore')
@@ -92,6 +93,157 @@ class SigmaPhaseModel:
         T_celsius = T_kelvin - 273.15
         
         return T_celsius
+
+class AdvancedSigmaPhaseModel:
+    def __init__(self):
+        self.models = {}
+        self.best_model = None
+        self.best_r2 = -np.inf
+        
+    def model1_power_law(self, params, t, T, G):
+        """Степенная модель: d = A * t^m * exp(-Q/RT) * f(G)"""
+        A, m, Q, p = params
+        grain_info = grain_df[grain_df['G'] == G].iloc[0]
+        fG = grain_info['inv_sqrt_a_v'] ** p
+        return A * (t ** m) * np.exp(-Q / (8.314 * (T + 273.15))) * fG
+    
+    def model2_saturating_growth(self, params, t, T, G):
+        """Модель насыщающего роста: d = d_max * [1 - exp(-k * t^n * exp(-Q/RT))]"""
+        d_max, k, n, Q, p = params
+        grain_info = grain_df[grain_df['G'] == G].iloc[0]
+        fG = grain_info['inv_sqrt_a_v'] ** p
+        rate = k * np.exp(-Q / (8.314 * (T + 273.15))) * fG
+        return d_max * (1 - np.exp(-rate * (t ** n)))
+    
+    def model3_modified_power(self, params, t, T, G):
+        """Модифицированная степенная модель: d = A * t^m * T^n * f(G)"""
+        A, m, n, p = params
+        grain_info = grain_df[grain_df['G'] == G].iloc[0]
+        fG = grain_info['inv_sqrt_a_v'] ** p
+        return A * (t ** m) * (T ** n) * fG
+    
+    def model4_simple_power(self, params, t, T, G):
+        """Простая степенная модель: d = A * t^m * T^n * G^p"""
+        A, m, n, p = params
+        return A * (t ** m) * (T ** n) * (G ** p)
+    
+    def fit_models(self, df):
+        """Обучение всех моделей"""
+        t_data = df['t'].values
+        T_data = df['T'].values
+        G_data = df['G'].values
+        d_data = df['d'].values
+        
+        models_config = {
+            'model1_power_law': {
+                'function': self.model1_power_law,
+                'bounds': ([0.1, 0.01, 1000, 0.1], [10, 1, 50000, 2]),
+                'initial_guess': [1, 0.1, 10000, 0.5]
+            },
+            'model2_saturating_growth': {
+                'function': self.model2_saturating_growth,
+                'bounds': ([1, 1e-6, 0.1, 1000, 0.1], [10, 1e-2, 2, 50000, 2]),
+                'initial_guess': [3, 1e-4, 0.5, 10000, 0.5]
+            },
+            'model3_modified_power': {
+                'function': self.model3_modified_power,
+                'bounds': ([0.1, 0.01, 0.1, 0.1], [10, 1, 2, 2]),
+                'initial_guess': [1, 0.1, 1, 0.5]
+            },
+            'model4_simple_power': {
+                'function': self.model4_simple_power,
+                'bounds': ([0.1, 0.01, 0.1, -1], [10, 1, 2, 1]),
+                'initial_guess': [1, 0.1, 1, 0.1]
+            }
+        }
+        
+        for model_name, config in models_config.items():
+            try:
+                def wrapper(X, *params):
+                    t, T, G = X
+                    return config['function'](params, t, T, G)
+                
+                popt, pcov = curve_fit(
+                    wrapper, 
+                    (t_data, T_data, G_data), 
+                    d_data,
+                    p0=config['initial_guess'],
+                    bounds=config['bounds'],
+                    maxfev=10000
+                )
+                
+                # Расчет предсказаний и R²
+                predictions = wrapper((t_data, T_data, G_data), *popt)
+                r2 = 1 - np.sum((d_data - predictions) ** 2) / np.sum((d_data - np.mean(d_data)) ** 2)
+                
+                self.models[model_name] = {
+                    'params': popt,
+                    'r2': r2,
+                    'predictions': predictions,
+                    'rmse': np.sqrt(np.mean((d_data - predictions) ** 2))
+                }
+                
+                if r2 > self.best_r2:
+                    self.best_r2 = r2
+                    self.best_model = model_name
+                    
+            except Exception as e:
+                st.warning(f"Модель {model_name} не сошлась: {str(e)}")
+    
+    def predict_temperature(self, model_name, d_sigma, time_hours, grain_size):
+        """Предсказание температуры по выбранной модели"""
+        if model_name not in self.models:
+            raise ValueError(f"Модель {model_name} не обучена")
+            
+        params = self.models[model_name]['params']
+        grain_info = grain_df[grain_df['G'] == grain_size].iloc[0]
+        
+        try:
+            if model_name == 'model1_power_law':
+                # d = A * t^m * exp(-Q/RT) * f(G)
+                A, m, Q, p = params
+                fG = grain_info['inv_sqrt_a_v'] ** p
+                term = d_sigma / (A * (time_hours ** m) * fG)
+                if term <= 0:
+                    raise ValueError("Некорректные параметры для расчета")
+                inv_T = -np.log(term) * 8.314 / Q
+                T_kelvin = 1 / inv_T
+                return T_kelvin - 273.15
+                
+            elif model_name == 'model2_saturating_growth':
+                # d = d_max * [1 - exp(-k * t^n * exp(-Q/RT) * f(G))]
+                d_max, k, n, Q, p = params
+                fG = grain_info['inv_sqrt_a_v'] ** p
+                if d_sigma >= d_max:
+                    return 1000  # Максимальная температура при насыщении
+                term = -np.log(1 - d_sigma / d_max) / (k * (time_hours ** n) * fG)
+                if term <= 0:
+                    raise ValueError("Некорректные параметры для расчета")
+                inv_T = -np.log(term) * 8.314 / Q
+                T_kelvin = 1 / inv_T
+                return T_kelvin - 273.15
+                
+            elif model_name == 'model3_modified_power':
+                # d = A * t^m * T^n * f(G)
+                A, m, n, p = params
+                fG = grain_info['inv_sqrt_a_v'] ** p
+                denominator = A * (time_hours ** m) * fG
+                if denominator <= 0:
+                    raise ValueError("Некорректные параметры для расчета")
+                T = (d_sigma / denominator) ** (1/n)
+                return T
+                
+            elif model_name == 'model4_simple_power':
+                # d = A * t^m * T^n * G^p
+                A, m, n, p = params
+                denominator = A * (time_hours ** m) * (grain_size ** p)
+                if denominator <= 0:
+                    raise ValueError("Некорректные параметры для расчета")
+                T = (d_sigma / denominator) ** (1/n)
+                return T
+                
+        except Exception as e:
+            raise ValueError(f"Ошибка расчета температуры: {str(e)}")
 
 def read_excel_file(uploaded_file):
     """Чтение Excel файла с обработкой различных форматов"""
@@ -227,163 +379,146 @@ def main():
                 if all(col in df.columns for col in required_columns):
                     st.success("✅ Данные успешно загружены!")
                     
+                    # Фильтруем некорректные температуры
+                    df_clean = df[(df['T'] >= 500) & (df['T'] <= 900)].copy()
+                    if len(df_clean) < len(df):
+                        st.warning(f"Исключено {len(df) - len(df_clean)} точек с температурами вне диапазона 500-900°C")
+                    
                     # Показываем статистику
                     st.subheader("Статистика данных")
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Количество измерений", len(df))
+                        st.metric("Количество измерений", len(df_clean))
                     with col2:
-                        st.metric("Диапазон температур", f"{df['T'].min()} - {df['T'].max()} °C")
+                        st.metric("Диапазон температур", f"{df_clean['T'].min()} - {df_clean['T'].max()} °C")
                     with col3:
-                        st.metric("Диапазон времени", f"{df['t'].min()} - {df['t'].max()} ч")
+                        st.metric("Диапазон времени", f"{df_clean['t'].min()} - {df_clean['t'].max()} ч")
                     with col4:
-                        st.metric("Номера зерен", ", ".join(map(str, sorted(df['G'].unique()))))
+                        st.metric("Номера зерен", ", ".join(map(str, sorted(df_clean['G'].unique()))))
                     
                     # Показываем данные
                     with st.expander("📋 Просмотр данных"):
-                        st.dataframe(df)
+                        st.dataframe(df_clean)
                     
-                    # Выбор данных для исключения
-                    st.subheader("2. Выбор данных для исключения")
-                    st.write("Исключите выбросы для улучшения модели:")
+                    # Визуализация данных
+                    st.subheader("📈 Визуализация экспериментальных данных")
                     
-                    excluded_indices = []
+                    # График зависимости от времени
+                    time_chart = alt.Chart(df_clean).mark_circle(size=60).encode(
+                        x=alt.X('t:Q', title='Время (ч)'),
+                        y=alt.Y('d:Q', title='Диаметр (мкм²)'),
+                        color=alt.Color('T:Q', scale=alt.Scale(scheme='redyellowblue'), title='Температура (°C)'),
+                        tooltip=['G', 'T', 't', 'd']
+                    ).properties(
+                        width=600,
+                        height=400,
+                        title='Зависимость диаметра от времени и температуры'
+                    ).facet(
+                        column='G:N'
+                    )
+                    st.altair_chart(time_chart)
                     
-                    for idx, row in df.iterrows():
-                        col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
-                        with col1:
-                            st.write(f"**{idx+1}**")
-                        with col2:
-                            st.write(f"G={row['G']}")
-                        with col3:
-                            st.write(f"T={row['T']}°C")
-                        with col4:
-                            st.write(f"t={row['t']}ч")
-                        with col5:
-                            if st.checkbox("Исключить", key=f"exclude_{idx}"):
-                                excluded_indices.append(idx)
+                    # Сравнение моделей
+                    st.subheader("🔍 Сравнение физических моделей")
                     
-                    st.info(f"Исключено точек: {len(excluded_indices)}")
+                    advanced_model = AdvancedSigmaPhaseModel()
+                    with st.spinner("Обучение моделей..."):
+                        advanced_model.fit_models(df_clean)
                     
-                    # Обучение модели
-                    st.subheader("3. Обучение модели")
-                    if len(df) - len(excluded_indices) >= 4:  # Минимум 4 точки для регрессии
-                        try:
-                            X, y, df_clean = prepare_data(df, excluded_indices)
-                            
-                            if len(df_clean) == 0:
-                                st.error("Нет данных для обучения после фильтрации. Проверьте, что все значения d > 0.")
-                                st.stop()
-                            
-                            model = SigmaPhaseModel()
-                            result = model.fit(X, y)
-                            
-                            if result is None:
-                                st.error("Не удалось обучить модель. Проверьте данные.")
-                                return
-                            
-                            # Предсказания
-                            y_pred = model.predict_ln_d(X)
-                            df_clean['d_pred'] = np.exp(y_pred)
-                            
-                            # Показываем коэффициенты модели
-                            st.subheader("Коэффициенты модели")
-                            st.latex(r"ln(d) = \beta_0 + \beta_1 \cdot ln(t) + \beta_2 \cdot \frac{1}{T} + \beta_3 \cdot ln\left(\frac{1}{\sqrt{a_v}}\right)")
-                            
-                            col1, col2, col3 = st.columns(3)
-                            with col1:
-                                st.metric("β₀ (intercept)", f"{model.intercept_:.6f}")
-                                st.metric("β₁ (ln(t))", f"{model.coef_[0]:.6f}")
-                            with col2:
-                                st.metric("β₂ (1/T)", f"{model.coef_[1]:.6f}")
-                                st.metric("β₃ (ln(1/√a_v))", f"{model.coef_[2]:.6f}")
-                            with col3:
-                                st.metric("Энергия активации Q", f"{-2 * 8.314 * model.coef_[1]:.1f} Дж/моль")
-                            
-                            # Метрики качества
-                            st.subheader("Метрики качества модели")
-                            col1, col2, col3, col4 = st.columns(4)
-                            with col1:
-                                st.metric("R²", f"{model.r2:.4f}")
-                            with col2:
-                                st.metric("RMSE", f"{model.rmse:.4f}")
-                            with col3:
-                                st.metric("MAE", f"{model.mae:.4f}")
-                            with col4:
-                                st.metric("Точек обучения", f"{len(df_clean)}")
-                            
-                            # Графики валидации
-                            st.subheader("4. Валидация модели")
-                            chart1, chart2, chart3 = create_validation_charts(df_clean, y, y_pred)
-                            
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.altair_chart(chart1, use_container_width=True)
-                                st.altair_chart(chart3, use_container_width=True)
-                            with col2:
-                                st.altair_chart(chart2, use_container_width=True)
-                                
-                                # График ошибок по температурам
-                                error_by_temp = df_clean.groupby('T').apply(
-                                    lambda x: (x['d'] - x['d_pred']).mean()
-                                ).reset_index()
-                                error_by_temp.columns = ['T', 'mean_error']
-                                
-                                chart4 = alt.Chart(error_by_temp).mark_bar().encode(
-                                    x=alt.X('T:Q', title='Температура (°C)'),
-                                    y=alt.Y('mean_error:Q', title='Средняя ошибка'),
-                                    tooltip=['T', 'mean_error']
-                                ).properties(
-                                    height=300,
-                                    title='Средняя ошибка по температурам'
-                                )
-                                st.altair_chart(chart4, use_container_width=True)
-                            
-                            # Таблица с сравнением
-                            st.subheader("Сравнение экспериментальных и расчетных значений")
-                            comparison_df = df_clean[['G', 'T', 't', 'd', 'd_pred']].copy()
-                            comparison_df['Ошибка, %'] = 100 * (comparison_df['d_pred'] - comparison_df['d']) / comparison_df['d']
-                            comparison_df['d'] = comparison_df['d'].round(4)
-                            comparison_df['d_pred'] = comparison_df['d_pred'].round(4)
-                            comparison_df['Ошибка, %'] = comparison_df['Ошибка, %'].round(2)
-                            
-                            st.dataframe(comparison_df)
-                            
-                            # Сохранение модели в сессии
-                            st.session_state['trained_model'] = model
-                            st.session_state['model_coef'] = model.coef_
-                            st.session_state['model_intercept'] = model.intercept_
-                            
-                            # Экспорт параметров модели
-                            st.subheader("5. Параметры модели для использования")
-                            st.code(f"""
-МОДЕЛЬ РОСТА СИГМА-ФАЗЫ
-Уравнение: ln(d) = β₀ + β₁·ln(t) + β₂·(1/T) + β₃·ln(1/√a_v)
-
-ПАРАМЕТРЫ:
-β₀ = {model.intercept_:.8f}
-β₁ = {model.coef_[0]:.8f}  
-β₂ = {model.coef_[1]:.8f}
-β₃ = {model.coef_[2]:.8f}
-
-ФОРМУЛА ДЛЯ РАСЧЕТА ТЕМПЕРАТУРЫ:
-T [°C] = β₂ / [ln(d) - β₀ - β₁·ln(t) - β₃·ln(1/√a_v)] - 273.15
-
-Энергия активации: {-2 * 8.314 * model.coef_[1]:.1f} Дж/моль
-Качество модели: R² = {model.r2:.4f}
-                            """)
-                            
-                        except Exception as e:
-                            st.error(f"Ошибка при обучении модели: {str(e)}")
+                    # Таблица сравнения моделей
+                    comparison_data = []
+                    for model_name, model_info in advanced_model.models.items():
+                        comparison_data.append({
+                            'Модель': model_name,
+                            'R²': model_info['r2'],
+                            'RMSE': model_info['rmse'],
+                            'Параметры': [f"{x:.4f}" for x in model_info['params']]
+                        })
+                    
+                    if comparison_data:
+                        comparison_df = pd.DataFrame(comparison_data)
+                        comparison_df = comparison_df.sort_values('R²', ascending=False)
+                        
+                        # Отображаем таблицу
+                        st.dataframe(comparison_df)
+                        
+                        # Выбор лучшей модели
+                        best_model_name = advanced_model.best_model
+                        best_model_info = advanced_model.models[best_model_name]
+                        
+                        st.success(f"🎯 Лучшая модель: **{best_model_name}** (R² = {best_model_info['r2']:.4f}, RMSE = {best_model_info['rmse']:.4f})")
+                        
+                        # Описания моделей
+                        model_descriptions = {
+                            'model1_power_law': 'd = A × t^m × exp(-Q/RT) × f(G)',
+                            'model2_saturating_growth': 'd = d_max × [1 - exp(-k × t^n × exp(-Q/RT) × f(G))]',
+                            'model3_modified_power': 'd = A × t^m × T^n × f(G)', 
+                            'model4_simple_power': 'd = A × t^m × T^n × G^p'
+                        }
+                        
+                        st.write(f"**Уравнение лучшей модели:** {model_descriptions.get(best_model_name, 'Неизвестно')}")
+                        
+                        # Сохранение лучшей модели
+                        st.session_state['advanced_model'] = advanced_model
+                        st.session_state['best_model_name'] = best_model_name
+                        st.session_state['training_data'] = df_clean
+                        
+                        # Визуализация предсказаний лучшей модели
+                        st.subheader("📊 Валидация лучшей модели")
+                        
+                        plot_data = pd.DataFrame({
+                            'Фактический': df_clean['d'],
+                            'Предсказанный': best_model_info['predictions'],
+                            'Зерно': df_clean['G'],
+                            'Температура': df_clean['T'],
+                            'Время': df_clean['t']
+                        })
+                        
+                        validation_chart = alt.Chart(plot_data).mark_circle(size=60).encode(
+                            x=alt.X('Фактический:Q', title='Фактический диаметр (мкм²)'),
+                            y=alt.Y('Предсказанный:Q', title='Предсказанный диаметр (мкм²)'),
+                            color='Зерно:N',
+                            tooltip=['Фактический', 'Предсказанный', 'Зерно', 'Температура', 'Время']
+                        ).properties(
+                            width=500,
+                            height=400,
+                            title=f'Предсказания модели {best_model_name}'
+                        )
+                        
+                        line = alt.Chart(pd.DataFrame({
+                            'x': [plot_data['Фактический'].min(), plot_data['Фактический'].max()],
+                            'y': [plot_data['Фактический'].min(), plot_data['Фактический'].max()]
+                        })).mark_line(color='red', strokeDash=[5,5]).encode(
+                            x='x:Q',
+                            y='y:Q'
+                        )
+                        
+                        st.altair_chart(validation_chart + line)
+                        
+                        # Показываем параметры модели
+                        st.subheader("📋 Параметры лучшей модели")
+                        param_names = {
+                            'model1_power_law': ['A', 'm', 'Q', 'p'],
+                            'model2_saturating_growth': ['d_max', 'k', 'n', 'Q', 'p'],
+                            'model3_modified_power': ['A', 'm', 'n', 'p'],
+                            'model4_simple_power': ['A', 'm', 'n', 'p']
+                        }
+                        
+                        params = best_model_info['params']
+                        names = param_names.get(best_model_name, [f'Param_{i}' for i in range(len(params))])
+                        
+                        for name, value in zip(names, params):
+                            st.write(f"**{name}** = {value:.6f}")
+                        
                     else:
-                        st.warning("⚠️ Недостаточно данных для обучения модели. Нужно минимум 4 измерения.")
+                        st.error("Ни одна из моделей не сошлась. Попробуйте изменить данные или границы параметров.")
                         
                 else:
                     missing_cols = [col for col in required_columns if col not in df.columns]
                     st.error(f"❌ В файле отсутствуют столбцы: {missing_cols}")
                     
             except Exception as e:
-                st.error(f"❌ Ошибка при чтении файла: {str(e)}")
+                st.error(f"❌ Ошибка при обработке данных: {str(e)}")
         else:
             st.info("📁 Загрузите Excel файл с колонками: G, T, t, d")
             
@@ -401,11 +536,12 @@ T [°C] = β₂ / [ln(d) - β₀ - β₁·ln(t) - β₃·ln(1/√a_v)] - 273.15
     with tab2:
         st.header("🧮 Калькулятор температуры эксплуатации")
         
-        if 'trained_model' in st.session_state:
-            model = st.session_state['trained_model']
+        if 'advanced_model' in st.session_state:
+            model = st.session_state['advanced_model']
+            best_model_name = st.session_state['best_model_name']
+            training_data = st.session_state.get('training_data', None)
             
-            st.success("✅ Модель готова к использованию!")
-            st.write("Введите параметры для расчета температуры:")
+            st.success(f"✅ Используется модель: **{best_model_name}**")
             
             col1, col2, col3 = st.columns(3)
             
@@ -415,13 +551,13 @@ T [°C] = β₂ / [ln(d) - β₀ - β₁·ln(t) - β₃·ln(1/√a_v)] - 273.15
                 time_hours = st.number_input("Время эксплуатации (ч)", min_value=1, value=5000, step=100)
             with col3:
                 d_sigma = st.number_input("Эквивалентный диаметр сигма-фазы (мкм²)", 
-                                        min_value=0.1, value=10.0, step=0.1)
+                                        min_value=0.1, value=2.0, step=0.1)
             
             if st.button("🎯 Рассчитать температуру", type="primary"):
                 try:
-                    temperature = model.predict_temperature(d_sigma, time_hours, grain_number)
+                    temperature = model.predict_temperature(best_model_name, d_sigma, time_hours, grain_number)
                     
-                    # Проверка диапазона работоспособности
+                    # Проверка диапазона
                     if temperature < 550:
                         st.error(f"""
                         ⚠️ **Рассчитанная температура: {temperature:.1f} °C**
@@ -453,8 +589,17 @@ T [°C] = β₂ / [ln(d) - β₀ - β₁·ln(t) - β₃·ln(1/√a_v)] - 273.15
                         st.write(f"**Параметры зерна №{grain_number}:**")
                         st.write(f"- Средняя площадь сечения: {grain_info['a_v']:.6f} мм²")
                         st.write(f"- Средний диаметр: {grain_info['d_av']:.3f} мм")
-                        st.write(f"- ln(1/√a_v) = {grain_info['ln_inv_sqrt_a_v']:.4f}")
+                        st.write(f"- 1/√a_v = {grain_info['inv_sqrt_a_v']:.2f} мм⁻¹")
                         
+                        if training_data is not None:
+                            similar_data = training_data[
+                                (training_data['G'] == grain_number) & 
+                                (training_data['t'].between(time_hours*0.5, time_hours*1.5))
+                            ]
+                            if len(similar_data) > 0:
+                                st.write("**Ближайшие экспериментальные точки:**")
+                                st.dataframe(similar_data)
+                            
                 except Exception as e:
                     st.error(f"❌ Ошибка при расчете: {str(e)}")
         else:

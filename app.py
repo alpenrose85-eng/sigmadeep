@@ -101,6 +101,21 @@ class DataValidator:
         if (t_values > max_time).any():
             st.warning(f"⚠️ Обнаружены значения времени эксплуатации свыше {max_time} часов")
         return True
+class DataValidator:
+    # ... все методы ...
+    
+    @staticmethod
+    def validate_time_range(t_values):
+        """Проверка диапазона времени эксплуатации"""
+        max_time = 500000
+        if (t_values > max_time).any():
+            st.warning(f"⚠️ Обнаружены значения времени эксплуатации свыше {max_time} часов")
+        return True
+
+# === DataValidator ЗАКОНЧИЛСЯ ЗДЕСЬ ===
+
+class GrainSizeConverter:  # ← Начало следующего класса
+    """Класс для преобразования номера зерна в физические параметры по ГОСТ 5639-82"""
 
 class GrainSizeConverter:
     """Класс для преобразования номера зерна в физические параметры по ГОСТ 5639-82"""

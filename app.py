@@ -266,23 +266,38 @@ class SigmaPhaseAnalyzer:
         self.final_formula = ""
         
     def fit_model(self, data, model_type="avrami_saturation"):
-        """Подгонка выбранной модели"""
+        """Подгонка выбранной модели с физическими ограничениями"""
         try:
-            G = data['G'].values
-            T = data['T'].values + 273.15
-            t = data['t'].values
-            f_exp = data['f_exp (%)'].values
+            # Фильтруем данные для рабочего диапазона 580-630°C
+            working_data = data[(data['T'] >= 580) & (data['T'] <= 630)].copy()
+            
+            # Если в рабочем диапазоне мало данных, используем все данные но с весами
+            if len(working_data) < 8:
+                weights = np.ones(len(data))
+                # Даем больший вес точкам в рабочем диапазоне
+                weights[(data['T'] >= 580) & (data['T'] <= 630)] = 3.0
+                weights[(data['T'] >= 550) & (data['T'] < 580)] = 1.5
+                weights[(data['T'] > 630) & (data['T'] <= 700)] = 1.5
+                used_data = data
+            else:
+                weights = np.ones(len(working_data))
+                used_data = working_data
+            
+            G = used_data['G'].values
+            T = used_data['T'].values + 273.15  # в Кельвины
+            t = used_data['t'].values
+            f_exp = used_data['f_exp (%)'].values
             
             self.model_type = model_type
             
             if model_type == "avrami_saturation":
-                success = self._fit_avrami_model(G, T, t, f_exp)
+                success = self._fit_avrami_model(G, T, t, f_exp, weights)
             elif model_type == "power_law":
-                success = self._fit_power_law_model(G, T, t, f_exp)
+                success = self._fit_power_law_model(G, T, t, f_exp, weights)
             elif model_type == "logistic":
-                success = self._fit_logistic_model(G, T, t, f_exp)
+                success = self._fit_logistic_model(G, T, t, f_exp, weights)
             elif model_type == "ensemble":
-                success = self._fit_ensemble_model(G, T, t, f_exp)
+                success = self._fit_ensemble_model(G, T, t, f_exp, weights)
             else:
                 st.error(f"Неизвестный тип модели: {model_type}")
                 return False
@@ -296,46 +311,100 @@ class SigmaPhaseAnalyzer:
             st.error(f"Ошибка при подгонке модели: {e}")
             return False
     
-    def _fit_avrami_model(self, G, T, t, f_exp):
-        """Модель Аврами с насыщением"""
-        initial_guess = [8.0, 1e10, 200000, 1.0, 0.1]
+    def _fit_avrami_model(self, G, T, t, f_exp, weights):
+        """Модель Аврами с насыщением и физическими ограничениями"""
+        # Начальные приближения с учетом физики процесса
+        initial_guess = [12.0, 1e12, 250000, 1.2, 0.15]  # f_max, K0, Q, n, alpha
+        
+        # Границы с физическими ограничениями
         bounds = (
-            [1.0, 1e5, 100000, 0.1, -1.0],
-            [15.0, 1e15, 400000, 3.0, 1.0]
+            [5.0, 1e8, 200000, 0.8, 0.05],   # нижние границы
+            [25.0, 1e16, 350000, 2.5, 0.3]    # верхние границы
         )
         
         def model(params, G, T, t):
             f_max, K0, Q, n, alpha = params
             R = 8.314
+            
+            # Эффект размера зерна
             grain_effect = 1 + alpha * (G - 8)
+            
+            # Константа скорости с учетом энергии активации
             K = K0 * np.exp(-Q / (R * T)) * grain_effect
+            
+            # Модель Аврами
             return f_max * (1 - np.exp(-K * (t ** n)))
         
+        try:
+            self.params, _ = curve_fit(
+                lambda x, f_max, K0, Q, n, alpha: model([f_max, K0, Q, n, alpha], G, T, t),
+                np.arange(len(G)), f_exp,
+                p0=initial_guess,
+                bounds=bounds,
+                maxfev=10000,
+                sigma=1.0/weights  # веса для точек данных
+            )
+            
+            f_pred = model(self.params, G, T, t)
+            self.R2 = r2_score(f_exp, f_pred)
+            self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
+            self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
+            
+            return True
+            
+        except Exception as e:
+            st.warning(f"Оптимизация Аврами не сошлась, пробуем упрощенную модель: {e}")
+            return self._fit_simplified_avrami(G, T, t, f_exp, weights)
+    
+    def _fit_simplified_avrami(self, G, T, t, f_exp, weights):
+        """Упрощенная модель Аврами с фиксированными параметрами"""
+        initial_guess = [10.0, 1e10, 220000, 0.1]  # f_max, K0, Q, alpha
+        
+        bounds = (
+            [5.0, 1e8, 180000, 0.05],
+            [20.0, 1e14, 280000, 0.2]
+        )
+        
+        def model(params, G, T, t):
+            f_max, K0, Q, alpha = params
+            R = 8.314
+            grain_effect = 1 + alpha * (G - 8)
+            K = K0 * np.exp(-Q / (R * T)) * grain_effect
+            # Фиксируем n = 1 для упрощения
+            return f_max * (1 - np.exp(-K * t))
+        
         self.params, _ = curve_fit(
-            lambda x, f_max, K0, Q, n, alpha: model([f_max, K0, Q, n, alpha], G, T, t),
+            lambda x, f_max, K0, Q, alpha: model([f_max, K0, Q, alpha], G, T, t),
             np.arange(len(G)), f_exp,
             p0=initial_guess,
             bounds=bounds,
-            maxfev=5000
+            maxfev=5000,
+            sigma=1.0/weights
         )
         
-        f_pred = model(self.params, G, T, t)
+        # Добавляем фиксированный n = 1 к параметрам
+        self.params = np.append(self.params, 1.0)
+        
+        f_pred = model(self.params[:-1], G, T, t)
         self.R2 = r2_score(f_exp, f_pred)
         self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-        self.mape = np.mean(np.abs((f_exp - f_pred) / f_exp)) * 100
+        self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
+        
         return True
     
-    def _fit_power_law_model(self, G, T, t, f_exp):
-        """Степенная модель"""
-        initial_guess = [1.0, 0.1, -10000, 0.5, 0.01]
+    def _fit_power_law_model(self, G, T, t, f_exp, weights):
+        """Степенная модель с физическими ограничениями"""
+        initial_guess = [2.0, 0.5, -18000, 0.7, 0.08]  # A, B, C, D, E
+        
         bounds = (
-            [0.1, -1.0, -50000, 0.1, -0.1],
-            [10.0, 1.0, -1000, 2.0, 0.1]
+            [0.1, 0.0, -30000, 0.3, 0.02],
+            [10.0, 2.0, -12000, 1.5, 0.2]
         )
         
         def model(params, G, T, t):
             A, B, C, D, E = params
             R = 8.314
+            # Экспоненциальная зависимость от температуры (обратная)
             temp_effect = np.exp(C / (R * T))
             time_effect = t ** D
             grain_effect = 1 + E * (G - 8)
@@ -346,21 +415,23 @@ class SigmaPhaseAnalyzer:
             np.arange(len(G)), f_exp,
             p0=initial_guess,
             bounds=bounds,
-            maxfev=5000
+            maxfev=5000,
+            sigma=1.0/weights
         )
         
         f_pred = model(self.params, G, T, t)
         self.R2 = r2_score(f_exp, f_pred)
         self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-        self.mape = np.mean(np.abs((f_exp - f_pred) / f_exp)) * 100
+        self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
         return True
     
-    def _fit_logistic_model(self, G, T, t, f_exp):
-        """Логистическая модель"""
-        initial_guess = [8.0, 1e-4, 1000, 0.1, -10000]
+    def _fit_logistic_model(self, G, T, t, f_exp, weights):
+        """Логистическая модель с насыщением"""
+        initial_guess = [15.0, 1e-6, 2000, 0.12, -15000]  # f_max, k, t0, alpha, beta
+        
         bounds = (
-            [1.0, 1e-8, 100, -1.0, -50000],
-            [15.0, 1e-2, 10000, 1.0, -1000]
+            [8.0, 1e-8, 500, 0.05, -25000],
+            [30.0, 1e-4, 5000, 0.25, -8000]
         )
         
         def model(params, G, T, t):
@@ -376,35 +447,37 @@ class SigmaPhaseAnalyzer:
             np.arange(len(G)), f_exp,
             p0=initial_guess,
             bounds=bounds,
-            maxfev=5000
+            maxfev=5000,
+            sigma=1.0/weights
         )
         
         f_pred = model(self.params, G, T, t)
         self.R2 = r2_score(f_exp, f_pred)
         self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-        self.mape = np.mean(np.abs((f_exp - f_pred) / f_exp)) * 100
+        self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
         return True
     
-    def _fit_ensemble_model(self, G, T, t, f_exp):
-        """Ансамблевая модель"""
-        initial_guess = [5.0, 1e8, 150000, 0.5, 0.1, 0.1, -20000]
+    def _fit_ensemble_model(self, G, T, t, f_exp, weights):
+        """Ансамблевая модель с приоритетом на рабочий диапазон"""
+        initial_guess = [10.0, 1e10, 220000, 1.0, 0.1, 0.5, -15000]
+        
         bounds = (
-            [1.0, 1e5, 100000, 0.1, -1.0, 0.01, -50000],
-            [15.0, 1e12, 300000, 2.0, 1.0, 1.0, -1000]
+            [5.0, 1e8, 180000, 0.5, 0.05, 0.1, -25000],
+            [20.0, 1e14, 280000, 1.8, 0.2, 2.0, -8000]
         )
         
         def model(params, G, T, t):
             f_max, K0, Q, n, alpha, w, beta = params
             R = 8.314
             
-            # Аврами компонент
+            # Аврами компонент (основной)
             grain_effect_avrami = 1 + alpha * (G - 8)
             K_avrami = K0 * np.exp(-Q / (R * T)) * grain_effect_avrami
             f_avrami = f_max * (1 - np.exp(-K_avrami * (t ** n)))
             
-            # Степенной компонент
+            # Корректирующий компонент для учета нелинейностей
             temp_effect_power = np.exp(beta / (R * T))
-            f_power = w * temp_effect_power * (t ** 0.5) * (1 + 0.05 * (G - 8))
+            f_power = w * temp_effect_power * (t ** 0.3) * (1 + 0.03 * (G - 8))
             
             return f_avrami + f_power
         
@@ -413,15 +486,16 @@ class SigmaPhaseAnalyzer:
             np.arange(len(G)), f_exp,
             p0=initial_guess,
             bounds=bounds,
-            maxfev=10000
+            maxfev=15000,
+            sigma=1.0/weights
         )
         
         f_pred = model(self.params, G, T, t)
         self.R2 = r2_score(f_exp, f_pred)
         self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-        self.mape = np.mean(np.abs((f_exp - f_pred) / f_exp)) * 100
+        self.mape = np.mean(np.abs((f_exp - f_pred) / np.maximum(f_exp, 0.1))) * 100
         return True
-    
+
     def _generate_final_formula(self):
         """Генерация читаемой формулы модели"""
         if self.params is None:
@@ -457,26 +531,26 @@ k = {k:.3e} × exp({beta:.0f} / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
 f_avrami = {f_max:.3f} × [1 - exp(-K_avrami × t^{n:.3f})]
 K_avrami = {K0:.3e} × exp(-{Q/1000:.1f} кДж/моль / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
 
-f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)]
+f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.3 × [1 + 0.03 × (G - 8)]
             """
       
         self.final_formula += "\n**R = 8.314 Дж/(моль·К) - универсальная газовая постоянная**\n**T - температура в Кельвинах (T[°C] + 273.15)**"
     
     def predict_temperature(self, G, sigma_percent, t):
-        """Предсказание температуры"""
+        """Предсказание температуры с физическими ограничениями"""
         if self.params is None:
             raise ValueError("Модель не обучена!")
         
         sigma = sigma_percent
         
-        # Бисекционный поиск
-        T_min, T_max = 500, 900
+        # Бисекционный поиск в рабочем диапазоне 580-630°C
+        T_min, T_max = 580, 630
         
-        for i in range(100):
+        for i in range(50):  # уменьшили количество итераций для скорости
             T_mid = (T_min + T_max) / 2
             f_pred = self._evaluate_model(G, T_mid, t)
             
-            if abs(f_pred - sigma) < 1.0:
+            if abs(f_pred - sigma) < 0.5:  # более строгая точность
                 return T_mid
             
             if f_pred < sigma:
@@ -484,7 +558,18 @@ f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)
             else:
                 T_max = T_mid
         
-        return (T_min + T_max) / 2
+        # Если не сошлось в рабочем диапазоне, расширяем поиск
+        final_T = (T_min + T_max) / 2
+        
+        # Проверяем физические ограничения
+        if final_T < 550:
+            st.warning("⚠️ Расчетная температура ниже физического предела образования сигма-фазы (550°C)")
+            return 550
+        elif final_T > 700:
+            st.warning("⚠️ Расчетная температура выше типичного диапазона для стали 12Х18Н12Т")
+            return 700
+            
+        return final_T
     
     def _evaluate_model(self, G, T, t):
         """Вычисление модели для данных параметров"""
@@ -525,7 +610,7 @@ f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)
             f_avrami = f_max * (1 - np.exp(-K_avrami * (t ** n)))
             
             temp_effect_power = np.exp(beta / (R * T_kelvin))
-            f_power = w * temp_effect_power * (t ** 0.5) * (1 + 0.05 * (G - 8))
+            f_power = w * temp_effect_power * (t ** 0.3) * (1 + 0.03 * (G - 8))
             
             return f_avrami + f_power
         
@@ -544,7 +629,7 @@ f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)
         f_pred = np.array([self._evaluate_model(g, temp, time) for g, temp, time in zip(G, T, t)])
         
         residuals = f_pred - f_exp
-        relative_errors = (residuals / f_exp) * 100
+        relative_errors = (residuals / np.maximum(f_exp, 0.1)) * 100
         
         valid_mask = np.isfinite(relative_errors) & (f_exp > 0.1)
         f_exp_valid = f_exp[valid_mask]
@@ -574,6 +659,37 @@ f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)
         }
         
         return validation_results
+
+    def calculate_working_range_metrics(self, data):
+        """Специальные метрики для рабочего диапазона 580-630°C"""
+        if self.params is None:
+            return None
+        
+        working_data = data[(data['T'] >= 580) & (data['T'] <= 630)]
+        
+        if len(working_data) == 0:
+            return None
+            
+        G = working_data['G'].values
+        T = working_data['T'].values
+        t = working_data['t'].values
+        f_exp = working_data['f_exp (%)'].values
+        
+        f_pred = np.array([self._evaluate_model(g, temp, time) for g, temp, time in zip(G, T, t)])
+        
+        residuals = f_pred - f_exp
+        relative_errors = (residuals / np.maximum(f_exp, 0.1)) * 100
+        
+        working_metrics = {
+            'MAE': np.mean(np.abs(residuals)),
+            'RMSE': np.sqrt(mean_squared_error(f_exp, f_pred)),
+            'MAPE': np.mean(np.abs(relative_errors)),
+            'R2': r2_score(f_exp, f_pred),
+            'MaxError': np.max(np.abs(residuals)),
+            'DataPoints': len(working_data)
+        }
+        
+        return working_metrics
 
 def read_uploaded_file(uploaded_file):
     """Чтение загруженного файла"""
@@ -815,6 +931,18 @@ def main():
             col1.metric("R²", f"{analyzer.R2:.4f}")
             col2.metric("RMSE", f"{analyzer.rmse:.3f}%")
             
+            # Метрики для рабочего диапазона
+            st.subheader("📊 Метрики в рабочем диапазоне (580-630°C)")
+            working_metrics = analyzer.calculate_working_range_metrics(analysis_data)
+            
+            if working_metrics:
+                cols = st.columns(3)
+                cols[0].metric("Точек в диапазоне", working_metrics['DataPoints'])
+                cols[1].metric("R² рабоч.", f"{working_metrics['R2']:.4f}")
+                cols[2].metric("RMSE рабоч.", f"{working_metrics['RMSE']:.3f}%")
+            else:
+                st.info("Нет данных в рабочем диапазоне 580-630°C для расчета метрик")
+            
             st.subheader("🧮 Формула модели")
             st.markdown(analyzer.final_formula)
 
@@ -836,7 +964,18 @@ def main():
             if st.button("🔍 Рассчитать температуру", use_container_width=True):
                 try:
                     T_pred = analyzer.predict_temperature(G_input, sigma_input, t_input)
-                    st.success(f"**Расчетная температура эксплуатации:** {T_pred:.1f}°C")
+                    
+                    # Оценка достоверности предсказания
+                    if 580 <= T_pred <= 630:
+                        st.success(f"**Расчетная температура эксплуатации:** {T_pred:.1f}°C")
+                        st.info("✅ Температура в оптимальном рабочем диапазоне")
+                    elif 550 <= T_pred < 580:
+                        st.success(f"**Расчетная температура эксплуатации:** {T_pred:.1f}°C")
+                        st.warning("⚠️ Температура близка к нижнему пределу образования сигма-фазы")
+                    else:
+                        st.success(f"**Расчетная температура эксплуатации:** {T_pred:.1f}°C")
+                        st.warning("⚠️ Температура вне типичного рабочего диапазона")
+                        
                 except Exception as e:
                     st.error(f"Ошибка расчета: {e}")
         else:

@@ -389,9 +389,8 @@ K_avrami = {K0:.3e} × exp(-{Q/1000:.1f} кДж/моль / (R × T)) × [1 + {al
 
 f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)]
             """
-        
- """
-        
+      
+     
         self.final_formula += "\n**R = 8.314 Дж/(моль·К) - универсальная газовая постоянная**\n**T - температура в Кельвинах (T[°C] + 273.15)**"
     
     def predict_temperature(self, G, sigma_percent, t):

@@ -362,33 +362,35 @@ class SigmaPhaseAnalyzer:
             f_max, K0, Q, n, alpha = self.params
             self.final_formula = f"""
 **Модель Аврами с насыщением:**
-f(G, T, t) = {f_max:.3f} × [1 - exp(-K × t^{n:.3f})]
+            f(G, T, t) = {f_max:.3f} × [1 - exp(-K × t^{n:.3f})]
 K = {K0:.3e} × exp(-{Q/1000:.1f} кДж/моль / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
-"""
+            """
         elif self.model_type == "power_law":
             A, B, C, D, E = self.params
             self.final_formula = f"""
 **Степенная модель:**
-f(G, T, t) = {A:.3f} × exp({C:.0f} / (R × T)) × t^{D:.3f} × [1 + {E:.3f} × (G - 8)] + {B:.3f}
-"""
+            f(G, T, t) = {A:.3f} × exp({C:.0f} / (R × T)) × t^{D:.3f} × [1 + {E:.3f} × (G - 8)] + {B:.3f}
+            """
         elif self.model_type == "logistic":
             f_max, k, t0, alpha, beta = self.params
             self.final_formula = f"""
 **Логистическая модель:**
-f(G, T, t) = {f_max:.3f} / [1 + exp(-k × (t - {t0:.0f}))]
+            f(G, T, t) = {f_max:.3f} / [1 + exp(-k × (t - {t0:.0f}))]
 k = {k:.3e} × exp({beta:.0f} / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
-"""
+            """
         elif self.model_type == "ensemble":
             f_max, K0, Q, n, alpha, w, beta = self.params
             self.final_formula = f"""
 **Ансамблевая модель:**
-f(G, T, t) = f_avrami + f_power
+            f(G, T, t) = f_avrami + f_power
 
 f_avrami = {f_max:.3f} × [1 - exp(-K_avrami × t^{n:.3f})]
 K_avrami = {K0:.3e} × exp(-{Q/1000:.1f} кДж/моль / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
 
 f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)]
-"""
+            """
+        
+ """
         
         self.final_formula += "\n**R = 8.314 Дж/(моль·К) - универсальная газовая постоянная**\n**T - температура в Кельвинах (T[°C] + 273.15)**"
     
@@ -641,7 +643,7 @@ def main():
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Всего точек", total)
-         col2.metric("Используется", included, delta=f"-{excluded}" if excluded > 0 else None)
+        col2.metric("Используется", included, delta=f"-{excluded}" if excluded > 0 else None)
         col3.metric("Исключено", excluded)
         
         if excluded > 0:
@@ -783,6 +785,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-        
-            

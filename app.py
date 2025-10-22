@@ -367,6 +367,45 @@ class SigmaPhaseAnalyzer:
         except:
             return None
 
+def read_uploaded_file(uploaded_file):
+    """Чтение загруженного файла с обработкой ошибок"""
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            # Пробуем разные кодировки и разделители
+            try:
+                data = pd.read_csv(uploaded_file, decimal=',', encoding='utf-8')
+            except:
+                try:
+                    data = pd.read_csv(uploaded_file, decimal=',', encoding='cp1251')
+                except:
+                    data = pd.read_csv(uploaded_file, decimal='.', encoding='utf-8')
+        else:
+            # Для Excel файлов
+            try:
+                if uploaded_file.name.endswith('.xlsx'):
+                    try:
+                        data = pd.read_excel(uploaded_file, engine='openpyxl')
+                    except ImportError:
+                        st.error("❌ Для чтения .xlsx файлов требуется библиотека openpyxl")
+                        st.info("Установите её командой: `pip install openpyxl`")
+                        return None
+                else:  # .xls
+                    try:
+                        data = pd.read_excel(uploaded_file, engine='xlrd')
+                    except ImportError:
+                        st.error("❌ Для чтения .xls файлов требуется библиотека xlrd")
+                        st.info("Установите её командой: `pip install xlrd`")
+                        return None
+            except Exception as e:
+                st.error(f"❌ Ошибка чтения Excel файла: {str(e)}")
+                return None
+        
+        return data
+        
+    except Exception as e:
+        st.error(f"❌ Ошибка чтения файла: {str(e)}")
+        return None
+
 def main():
     # Инициализация сессии
     if 'analyzer' not in st.session_state:
@@ -416,23 +455,9 @@ def main():
     
     # Обработка загруженного файла
     if uploaded_file is not None:
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                # Пробуем разные кодировки и разделители
-                try:
-                    data = pd.read_csv(uploaded_file, decimal=',', encoding='utf-8')
-                except:
-                    try:
-                        data = pd.read_csv(uploaded_file, decimal=',', encoding='cp1251')
-                    except:
-                        data = pd.read_csv(uploaded_file, decimal='.', encoding='utf-8')
-            else:
-                # Для Excel файлов
-                if uploaded_file.name.endswith('.xlsx'):
-                    data = pd.read_excel(uploaded_file, engine='openpyxl')
-                else:  # .xls
-                    data = pd.read_excel(uploaded_file, engine='xlrd')
-            
+        data = read_uploaded_file(uploaded_file)
+        
+        if data is not None:
             # Нормализуем названия колонок
             data = DataValidator.normalize_column_names(data)
             
@@ -449,9 +474,6 @@ def main():
                 st.sidebar.error(f"❌ {message}")
                 # Показываем какие колонки есть в файле
                 st.sidebar.info(f"Найденные колонки: {list(data.columns)}")
-                
-        except Exception as e:
-            st.sidebar.error(f"❌ Ошибка чтения файла: {str(e)}")
     
     # Если данных нет, используем пример
     if st.session_state.current_data is None:

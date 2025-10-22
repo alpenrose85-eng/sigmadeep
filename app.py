@@ -641,6 +641,148 @@ def main():
         
         col1, col2, col3 = st.columns(3)
         col1.metric("Всего точек", total)
+         col2.metric("Используется", included, delta=f"-{excluded}" if excluded > 0 else None)
+        col3.metric("Исключено", excluded)
+        
+        if excluded > 0:
+            st.warning(f"Исключенные точки: {[i+1 for i in sorted(st.session_state.excluded_points)]}")
+            if st.button("🔄 Включить все точки"):
+                st.session_state.excluded_points = set()
+                st.rerun()
+        
+        # Подготовка данных для анализа
+        analysis_data = st.session_state.current_data.copy()
+        if st.session_state.excluded_points:
+            analysis_data = analysis_data.drop(list(st.session_state.excluded_points)).reset_index(drop=True)
+        
+        # Подбор модели
+        st.header("🎯 Подбор параметров модели")
+        
+        # Исправленная строка - убрал лишние фигурные скобки
+        model_names = {
+            'avrami_saturation': 'Аврами с насыщением', 
+            'power_law': 'Степенная', 
+            'logistic': 'Логистическая', 
+            'ensemble': 'Ансамблевая'
+        }
+        st.write(f"**Выбрана модель:** {model_names[model_type]}")
+        
+        if st.button("🚀 Обучить модель", type="primary", use_container_width=True):
+            if len(analysis_data) < 5:
+                st.error("❌ Слишком мало данных для обучения. Нужно как минимум 5 точек.")
+            else:
+                analyzer = SigmaPhaseAnalyzer()
+                with st.spinner("Подбираем параметры модели..."):
+                    success = analyzer.fit_model(analysis_data, model_type)
+                
+                if success:
+                    st.session_state.analyzer = analyzer
+                    validation_results = analyzer.calculate_validation_metrics(analysis_data)
+                    st.session_state.validation_results = validation_results
+                    st.success(f"✅ Модель обучена! R² = {analyzer.R2:.4f}")
+                    st.rerun()
+        
+        # Показ результатов
+        if st.session_state.analyzer is not None:
+            analyzer = st.session_state.analyzer
+            
+            st.subheader("📈 Параметры модели")
+            if analyzer.model_type == "ensemble":
+                f_max, K0, Q, n, alpha, w, beta = analyzer.params
+                cols = st.columns(4)
+                cols[0].metric("f_max", f"{f_max:.3f}%")
+                cols[1].metric("K₀", f"{K0:.2e}")
+                cols[2].metric("Q", f"{Q/1000:.1f} кДж/моль")
+                cols[3].metric("n", f"{n:.3f}")
+                cols[0].metric("α", f"{alpha:.3f}")
+                cols[1].metric("w", f"{w:.3f}")
+                cols[2].metric("β", f"{beta:.0f}")
+            
+            st.subheader("📊 Метрики качества")
+            col1, col2 = st.columns(2)
+            col1.metric("R²", f"{analyzer.R2:.4f}")
+            col2.metric("RMSE", f"{analyzer.rmse:.3f}%")
+            
+            st.subheader("🧮 Формула модели")
+            st.markdown(analyzer.final_formula)
+
+    # ВКЛАДКА 2: Калькулятор
+    with tab2:
+        st.header("🧮 Калькулятор температуры")
+        
+        if st.session_state.analyzer is not None:
+            analyzer = st.session_state.analyzer
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                G_input = st.number_input("Номер зерна (G)", value=8.0, min_value=-3.0, max_value=14.0, step=0.1)
+            with col2:
+                sigma_input = st.number_input("Содержание сигма-фазы (%)", value=2.0, min_value=0.1, max_value=20.0, step=0.1)
+            with col3:
+                t_input = st.number_input("Время (ч)", value=4000, min_value=100, max_value=500000, step=100)
+            
+            if st.button("🔍 Рассчитать температуру", use_container_width=True):
+                try:
+                    T_pred = analyzer.predict_temperature(G_input, sigma_input, t_input)
+                    st.success(f"**Расчетная температура эксплуатации:** {T_pred:.1f}°C")
+                except Exception as e:
+                    st.error(f"Ошибка расчета: {e}")
+        else:
+            st.info("👆 Сначала обучите модель на вкладке 'Данные и модель'")
+
+    # ВКЛАДКА 3: Валидация
+    with tab3:
+        st.header("📈 Валидация модели")
+        
+        if st.session_state.analyzer is not None and st.session_state.validation_results is not None:
+            analyzer = st.session_state.analyzer
+            validation = st.session_state.validation_results
+            
+            # Метрики
+            metrics = validation['metrics']
+            st.subheader("📊 Метрики качества")
+            cols = st.columns(4)
+            cols[0].metric("R²", f"{metrics['R2']:.4f}")
+            cols[1].metric("MAE", f"{metrics['MAE']:.3f}%")
+            cols[2].metric("RMSE", f"{metrics['RMSE']:.3f}%")
+            cols[3].metric("MAPE", f"{metrics['MAPE']:.2f}%")
+            
+            # График
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=validation['data']['f_exp (%)'],
+                y=validation['predictions'],
+                mode='markers',
+                name='Предсказания',
+                marker=dict(size=10, color='blue')
+            ))
+            max_val = max(validation['data']['f_exp (%)'].max(), validation['predictions'].max())
+            fig.add_trace(go.Scatter(
+                x=[0, max_val], y=[0, max_val],
+                mode='lines',
+                name='Идеально',
+                line=dict(color='red', dash='dash')
+            ))
+            fig.update_layout(
+                title='Предсказание vs Эксперимент',
+                xaxis_title='Эксперимент (%)',
+                yaxis_title='Модель (%)'
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Таблица
+            st.subheader("📋 Детальное сравнение")
+            comp_df = validation['data'].copy()
+            comp_df['f_pred (%)'] = validation['predictions'].round(3)
+            comp_df['Ошибка (%)'] = validation['residuals'].round(3)
+            comp_df['Отн. ошибка (%)'] = validation['relative_errors'].round(1)
+            st.dataframe(comp_df, use_container_width=True)
+            
+        else:
+            st.info("👆 Сначала обучите модель на вкладке 'Данные и модель'")
+
+if __name__ == "__main__":
+    main()
 
         
             

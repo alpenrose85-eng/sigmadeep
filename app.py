@@ -105,7 +105,6 @@ class DataValidator:
 class GrainSizeConverter:
     """Класс для преобразования номера зерна в физические параметры по ГОСТ 5639-82"""
     
-    # Данные из ГОСТ 5639-82
     GRAIN_DATA = {
         -3: {'area_mm2': 1.000, 'diameter_mm': 1.000, 'conditional_diameter_mm': 0.875, 'grains_per_mm2': 1.0},
         -2: {'area_mm2': 0.500, 'diameter_mm': 0.707, 'conditional_diameter_mm': 0.650, 'grains_per_mm2': 2.8},
@@ -134,19 +133,16 @@ class GrainSizeConverter:
         if data:
             return data['area_mm2']
         else:
-            # Интерполяция для промежуточных значений
             numbers = sorted(cls.GRAIN_DATA.keys())
             if grain_number < numbers[0]:
                 return cls.GRAIN_DATA[numbers[0]]['area_mm2']
             elif grain_number > numbers[-1]:
                 return cls.GRAIN_DATA[numbers[-1]]['area_mm2']
             else:
-                # Находим ближайшие известные значения
                 lower = max([n for n in numbers if n <= grain_number])
                 upper = min([n for n in numbers if n >= grain_number])
                 if lower == upper:
                     return cls.GRAIN_DATA[lower]['area_mm2']
-                # Линейная интерполяция в логарифмической шкале
                 log_area_lower = np.log(cls.GRAIN_DATA[lower]['area_mm2'])
                 log_area_upper = np.log(cls.GRAIN_DATA[upper]['area_mm2'])
                 fraction = (grain_number - lower) / (upper - lower)
@@ -160,7 +156,6 @@ class GrainSizeConverter:
         if data:
             return data['conditional_diameter_mm'] if use_conditional else data['diameter_mm']
         else:
-            # Интерполяция для промежуточных значений
             numbers = sorted(cls.GRAIN_DATA.keys())
             if grain_number < numbers[0]:
                 return cls.GRAIN_DATA[numbers[0]]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[numbers[0]]['diameter_mm']
@@ -171,7 +166,6 @@ class GrainSizeConverter:
                 upper = min([n for n in numbers if n >= grain_number])
                 if lower == upper:
                     return cls.GRAIN_DATA[lower]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[lower]['diameter_mm']
-                # Линейная интерполяция
                 diam_lower = cls.GRAIN_DATA[lower]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[lower]['diameter_mm']
                 diam_upper = cls.GRAIN_DATA[upper]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[upper]['diameter_mm']
                 fraction = (grain_number - lower) / (upper - lower)
@@ -179,95 +173,184 @@ class GrainSizeConverter:
     
     @classmethod
     def calculate_grain_boundary_density(cls, grain_number):
-        """
-        Расчет плотности границ зерен (мм²/мм³)
-        Используем условный диаметр из ГОСТ
-        """
-        d = cls.grain_number_to_diameter(grain_number, use_conditional=True)  # мм
-        
-        # Для сферических зерен: Sv = 3/R = 6/D
-        Sv = 3.0 / (d / 2.0)  # мм²/мм³
-        
+        """Расчет плотности границ зерен (мм²/мм³)"""
+        d = cls.grain_number_to_diameter(grain_number, use_conditional=True)
+        Sv = 3.0 / (d / 2.0)
         return Sv
     
     @classmethod
     def calculate_activation_energy_factor(cls, grain_number):
-        """
-        Коэффициент влияния размера зерна на энергию активации
-        Учитывает реальные геометрические параметры из ГОСТ
-        """
-        # Нормализуем относительно номера зерна 5 (базовый)
+        """Коэффициент влияния размера зерна на энергию активации"""
         ref_grain = 5
         Sv_ref = cls.calculate_grain_boundary_density(ref_grain)
         Sv_current = cls.calculate_grain_boundary_density(grain_number)
-        
         return Sv_current / Sv_ref
 
-class AdvancedSigmaPhaseAnalyzer:
+class SigmaPhaseAnalyzer:
     def __init__(self):
         self.params = None
         self.R2 = None
         self.rmse = None
         self.mape = None
         self.model_type = None
-        self.creation_date = datetime.now().isoformat()
         self.final_formula = ""
         
-    def fit_ensemble_model(self, data):
-        """Ансамблевая модель - комбинация нескольких подходов"""
+    def fit_model(self, data, model_type="avrami_saturation"):
+        """Подгонка выбранной модели"""
         try:
             G = data['G'].values
             T = data['T'].values + 273.15
             t = data['t'].values
             f_exp = data['f_exp (%)'].values
             
-            # Параметры для ансамбля: f_max, K0, Q, n, alpha, w, beta
-            initial_guess = [5.0, 1e8, 150000, 0.5, 0.1, 0.1, -20000]
-            bounds = (
-                [1.0, 1e5, 100000, 0.1, -1.0, 0.01, -50000],
-                [15.0, 1e12, 300000, 2.0, 1.0, 1.0, -1000]
-            )
+            self.model_type = model_type
             
-            def model(params, G, T, t):
-                f_max, K0, Q, n, alpha, w, beta = params
-                R = 8.314
+            if model_type == "avrami_saturation":
+                success = self._fit_avrami_model(G, T, t, f_exp)
+            elif model_type == "power_law":
+                success = self._fit_power_law_model(G, T, t, f_exp)
+            elif model_type == "logistic":
+                success = self._fit_logistic_model(G, T, t, f_exp)
+            elif model_type == "ensemble":
+                success = self._fit_ensemble_model(G, T, t, f_exp)
+            else:
+                st.error(f"Неизвестный тип модели: {model_type}")
+                return False
                 
-                # Компонент Аврами
-                grain_effect_avrami = 1 + alpha * (G - 8)
-                K_avrami = K0 * np.exp(-Q / (R * T)) * grain_effect_avrami
-                f_avrami = f_max * (1 - np.exp(-K_avrami * (t ** n)))
+            if success:
+                self._generate_final_formula()
                 
-                # Компонент степенного закона
-                temp_effect_power = np.exp(beta / (R * T))
-                f_power = w * temp_effect_power * (t ** 0.5) * (1 + 0.05 * (G - 8))
-                
-                # Комбинированная модель
-                f_pred = f_avrami + f_power
-                return np.clip(f_pred, 0, 15)
-            
-            self.params, _ = curve_fit(
-                lambda x, f_max, K0, Q, n, alpha, w, beta: model([f_max, K0, Q, n, alpha, w, beta], G, T, t),
-                np.arange(len(G)), f_exp,
-                p0=initial_guess,
-                bounds=bounds,
-                maxfev=10000
-            )
-            
-            # Расчет метрик
-            f_pred = model(self.params, G, T, t)
-            self.R2 = r2_score(f_exp, f_pred)
-            self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
-            self.mape = np.mean(np.abs((f_exp - f_pred) / f_exp)) * 100
-            self.model_type = "ensemble"
-            
-            # Генерация финальной формулы
-            self._generate_final_formula()
-            
-            return True
+            return success
             
         except Exception as e:
-            st.error(f"Ошибка в ансамблевой модели: {e}")
+            st.error(f"Ошибка при подгонке модели: {e}")
             return False
+    
+    def _fit_avrami_model(self, G, T, t, f_exp):
+        """Модель Аврами с насыщением"""
+        initial_guess = [8.0, 1e10, 200000, 1.0, 0.1]
+        bounds = (
+            [1.0, 1e5, 100000, 0.1, -1.0],
+            [15.0, 1e15, 400000, 3.0, 1.0]
+        )
+        
+        def model(params, G, T, t):
+            f_max, K0, Q, n, alpha = params
+            R = 8.314
+            grain_effect = 1 + alpha * (G - 8)
+            K = K0 * np.exp(-Q / (R * T)) * grain_effect
+            return f_max * (1 - np.exp(-K * (t ** n)))
+        
+        self.params, _ = curve_fit(
+            lambda x, f_max, K0, Q, n, alpha: model([f_max, K0, Q, n, alpha], G, T, t),
+            np.arange(len(G)), f_exp,
+            p0=initial_guess,
+            bounds=bounds,
+            maxfev=5000
+        )
+        
+        f_pred = model(self.params, G, T, t)
+        self.R2 = r2_score(f_exp, f_pred)
+        self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
+        self.mape = np.mean(np.abs((f_exp - f_pred) / f_exp)) * 100
+        return True
+    
+    def _fit_power_law_model(self, G, T, t, f_exp):
+        """Степенная модель"""
+        initial_guess = [1.0, 0.1, -10000, 0.5, 0.01]
+        bounds = (
+            [0.1, -1.0, -50000, 0.1, -0.1],
+            [10.0, 1.0, -1000, 2.0, 0.1]
+        )
+        
+        def model(params, G, T, t):
+            A, B, C, D, E = params
+            R = 8.314
+            temp_effect = np.exp(C / (R * T))
+            time_effect = t ** D
+            grain_effect = 1 + E * (G - 8)
+            return A * temp_effect * time_effect * grain_effect + B
+        
+        self.params, _ = curve_fit(
+            lambda x, A, B, C, D, E: model([A, B, C, D, E], G, T, t),
+            np.arange(len(G)), f_exp,
+            p0=initial_guess,
+            bounds=bounds,
+            maxfev=5000
+        )
+        
+        f_pred = model(self.params, G, T, t)
+        self.R2 = r2_score(f_exp, f_pred)
+        self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
+        self.mape = np.mean(np.abs((f_exp - f_pred) / f_exp)) * 100
+        return True
+    
+    def _fit_logistic_model(self, G, T, t, f_exp):
+        """Логистическая модель"""
+        initial_guess = [8.0, 1e-4, 1000, 0.1, -10000]
+        bounds = (
+            [1.0, 1e-8, 100, -1.0, -50000],
+            [15.0, 1e-2, 10000, 1.0, -1000]
+        )
+        
+        def model(params, G, T, t):
+            f_max, k, t0, alpha, beta = params
+            R = 8.314
+            temp_factor = np.exp(beta / (R * T))
+            grain_factor = 1 + alpha * (G - 8)
+            rate = k * temp_factor * grain_factor
+            return f_max / (1 + np.exp(-rate * (t - t0)))
+        
+        self.params, _ = curve_fit(
+            lambda x, f_max, k, t0, alpha, beta: model([f_max, k, t0, alpha, beta], G, T, t),
+            np.arange(len(G)), f_exp,
+            p0=initial_guess,
+            bounds=bounds,
+            maxfev=5000
+        )
+        
+        f_pred = model(self.params, G, T, t)
+        self.R2 = r2_score(f_exp, f_pred)
+        self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
+        self.mape = np.mean(np.abs((f_exp - f_pred) / f_exp)) * 100
+        return True
+    
+    def _fit_ensemble_model(self, G, T, t, f_exp):
+        """Ансамблевая модель"""
+        initial_guess = [5.0, 1e8, 150000, 0.5, 0.1, 0.1, -20000]
+        bounds = (
+            [1.0, 1e5, 100000, 0.1, -1.0, 0.01, -50000],
+            [15.0, 1e12, 300000, 2.0, 1.0, 1.0, -1000]
+        )
+        
+        def model(params, G, T, t):
+            f_max, K0, Q, n, alpha, w, beta = params
+            R = 8.314
+            
+            # Аврами компонент
+            grain_effect_avrami = 1 + alpha * (G - 8)
+            K_avrami = K0 * np.exp(-Q / (R * T)) * grain_effect_avrami
+            f_avrami = f_max * (1 - np.exp(-K_avrami * (t ** n)))
+            
+            # Степенной компонент
+            temp_effect_power = np.exp(beta / (R * T))
+            f_power = w * temp_effect_power * (t ** 0.5) * (1 + 0.05 * (G - 8))
+            
+            return f_avrami + f_power
+        
+        self.params, _ = curve_fit(
+            lambda x, f_max, K0, Q, n, alpha, w, beta: model([f_max, K0, Q, n, alpha, w, beta], G, T, t),
+            np.arange(len(G)), f_exp,
+            p0=initial_guess,
+            bounds=bounds,
+            maxfev=10000
+        )
+        
+        f_pred = model(self.params, G, T, t)
+        self.R2 = r2_score(f_exp, f_pred)
+        self.rmse = np.sqrt(mean_squared_error(f_exp, f_pred))
+        self.mape = np.mean(np.abs((f_exp - f_pred) / f_exp)) * 100
+        return True
     
     def _generate_final_formula(self):
         """Генерация читаемой формулы модели"""
@@ -275,53 +358,55 @@ class AdvancedSigmaPhaseAnalyzer:
             self.final_formula = "Модель не обучена"
             return
             
-        f_max, K0, Q, n, alpha, w, beta = self.params
-        
-        self.final_formula = f"""
-**Финальная формула ансамблевой модели:**
-f(G, T, t) = f_avrami(G, T, t) + f_power(G, T, t)
+        if self.model_type == "avrami_saturation":
+            f_max, K0, Q, n, alpha = self.params
+            self.final_formula = f"""
+**Модель Аврами с насыщением:**
+            f(G, T, t) = {f_max:.3f} × [1 - exp(-K × t^{n:.3f})]
+K = {K0:.3e} × exp(-{Q/1000:.1f} кДж/моль / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
+            """
+        elif self.model_type == "power_law":
+            A, B, C, D, E = self.params
+            self.final_formula = f"""
+**Степенная модель:**
+            f(G, T, t) = {A:.3f} × exp({C:.0f} / (R × T)) × t^{D:.3f} × [1 + {E:.3f} × (G - 8)] + {B:.3f}
+            """
+        elif self.model_type == "logistic":
+            f_max, k, t0, alpha, beta = self.params
+            self.final_formula = f"""
+**Логистическая модель:**
+            f(G, T, t) = {f_max:.3f} / [1 + exp(-k × (t - {t0:.0f}))]
+k = {k:.3e} × exp({beta:.0f} / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
+            """
+        elif self.model_type == "ensemble":
+            f_max, K0, Q, n, alpha, w, beta = self.params
+            self.final_formula = f"""
+**Ансамблевая модель:**
+            f(G, T, t) = f_avrami + f_power
 
-где:
-
-f_avrami(G, T, t) = {f_max:.3f} × [1 - exp(-K_avrami × t^{n:.3f})]
+f_avrami = {f_max:.3f} × [1 - exp(-K_avrami × t^{n:.3f})]
 K_avrami = {K0:.3e} × exp(-{Q/1000:.1f} кДж/моль / (R × T)) × [1 + {alpha:.3f} × (G - 8)]
 
-f_power(G, T, t) = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)]
-
-R = 8.314 Дж/(моль·К) - универсальная газовая постоянная
-T - температура в Кельвинах (T[°C] + 273.15)
+f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)]
+            """
         
-**Расшифровка параметров:**
-- `f_max = {f_max:.3f} %` - максимальное содержание сигма-фазы
-- `K0 = {K0:.3e}` - предэкспоненциальный множитель
-- `Q = {Q/1000:.1f} кДж/моль` - энергия активации
-- `n = {n:.3f}` - показатель степени в модели Аврами
-- `α = {alpha:.3f}` - коэффициент влияния размера зерна
-- `w = {w:.3f}` - вес степенного компонента
-- `β = {beta:.0f}` - температурный коэффициент в степенном законе
-"""
+        self.final_formula += "\n**R = 8.314 Дж/(моль·К) - универсальная газовая постоянная**\n**T - температура в Кельвинах (T[°C] + 273.15)**"
     
-    def predict_temperature(self, G, sigma_percent, t, method="bisection"):
-        """Предсказание температуры разными методами"""
+    def predict_temperature(self, G, sigma_percent, t):
+        """Предсказание температуры"""
         if self.params is None:
             raise ValueError("Модель не обучена!")
         
         sigma = sigma_percent
         
-        if method == "bisection":
-            return self._predict_temperature_bisection(G, sigma, t)
-        else:
-            return self._predict_temperature_analytic(G, sigma, t)
-    
-    def _predict_temperature_bisection(self, G, sigma, t, tol=1.0, max_iter=100):
-        """Бисекционный поиск температуры"""
-        T_min, T_max = 500, 900  # Реалистичный диапазон
+        # Бисекционный поиск
+        T_min, T_max = 500, 900
         
-        for i in range(max_iter):
+        for i in range(100):
             T_mid = (T_min + T_max) / 2
             f_pred = self._evaluate_model(G, T_mid, t)
             
-            if abs(f_pred - sigma) < tol:
+            if abs(f_pred - sigma) < 1.0:
                 return T_mid
             
             if f_pred < sigma:
@@ -337,19 +422,44 @@ T - температура в Кельвинах (T[°C] + 273.15)
             return 0.0
             
         T_kelvin = T + 273.15
-        f_max, K0, Q, n, alpha, w, beta = self.params
-        R = 8.314
         
-        # Аврами компонент
-        grain_effect_avrami = 1 + alpha * (G - 8)
-        K_avrami = K0 * np.exp(-Q / (R * T_kelvin)) * grain_effect_avrami
-        f_avrami = f_max * (1 - np.exp(-K_avrami * (t ** n)))
+        if self.model_type == "avrami_saturation":
+            f_max, K0, Q, n, alpha = self.params
+            R = 8.314
+            grain_effect = 1 + alpha * (G - 8)
+            K = K0 * np.exp(-Q / (R * T_kelvin)) * grain_effect
+            return f_max * (1 - np.exp(-K * (t ** n)))
         
-        # Степенной компонент
-        temp_effect_power = np.exp(beta / (R * T_kelvin))
-        f_power = w * temp_effect_power * (t ** 0.5) * (1 + 0.05 * (G - 8))
+        elif self.model_type == "power_law":
+            A, B, C, D, E = self.params
+            R = 8.314
+            temp_effect = np.exp(C / (R * T_kelvin))
+            time_effect = t ** D
+            grain_effect = 1 + E * (G - 8)
+            return A * temp_effect * time_effect * grain_effect + B
         
-        return f_avrami + f_power
+        elif self.model_type == "logistic":
+            f_max, k, t0, alpha, beta = self.params
+            R = 8.314
+            temp_factor = np.exp(beta / (R * T_kelvin))
+            grain_factor = 1 + alpha * (G - 8)
+            rate = k * temp_factor * grain_factor
+            return f_max / (1 + np.exp(-rate * (t - t0)))
+        
+        elif self.model_type == "ensemble":
+            f_max, K0, Q, n, alpha, w, beta = self.params
+            R = 8.314
+            
+            grain_effect_avrami = 1 + alpha * (G - 8)
+            K_avrami = K0 * np.exp(-Q / (R * T_kelvin)) * grain_effect_avrami
+            f_avrami = f_max * (1 - np.exp(-K_avrami * (t ** n)))
+            
+            temp_effect_power = np.exp(beta / (R * T_kelvin))
+            f_power = w * temp_effect_power * (t ** 0.5) * (1 + 0.05 * (G - 8))
+            
+            return f_avrami + f_power
+        
+        return 0.0
     
     def calculate_validation_metrics(self, data):
         """Расчет метрик валидации"""
@@ -366,7 +476,6 @@ T - температура в Кельвинах (T[°C] + 273.15)
         residuals = f_pred - f_exp
         relative_errors = (residuals / f_exp) * 100
         
-        # Фильтрация бесконечных значений
         valid_mask = np.isfinite(relative_errors) & (f_exp > 0.1)
         f_exp_valid = f_exp[valid_mask]
         f_pred_valid = f_pred[valid_mask]
@@ -397,10 +506,9 @@ T - температура в Кельвинах (T[°C] + 273.15)
         return validation_results
 
 def read_uploaded_file(uploaded_file):
-    """Чтение загруженного файла с обработкой ошибок"""
+    """Чтение загруженного файла"""
     try:
         if uploaded_file.name.endswith('.csv'):
-            # Пробуем разные кодировки и разделители
             try:
                 data = pd.read_csv(uploaded_file, decimal=',', encoding='utf-8')
             except:
@@ -409,22 +517,11 @@ def read_uploaded_file(uploaded_file):
                 except:
                     data = pd.read_csv(uploaded_file, decimal='.', encoding='utf-8')
         else:
-            # Для Excel файлов
             try:
                 if uploaded_file.name.endswith('.xlsx'):
-                    try:
-                        data = pd.read_excel(uploaded_file, engine='openpyxl')
-                    except ImportError:
-                        st.error("❌ Для чтения .xlsx файлов требуется библиотека openpyxl")
-                        st.info("Установите её командой: `pip install openpyxl`")
-                        return None
-                else:  # .xls
-                    try:
-                        data = pd.read_excel(uploaded_file, engine='xlrd')
-                    except ImportError:
-                        st.error("❌ Для чтения .xls файлов требуется библиотека xlrd")
-                        st.info("Установите её командой: `pip install xlrd`")
-                        return None
+                    data = pd.read_excel(uploaded_file, engine='openpyxl')
+                else:
+                    data = pd.read_excel(uploaded_file, engine='xlrd')
             except Exception as e:
                 st.error(f"❌ Ошибка чтения Excel файла: {str(e)}")
                 return None
@@ -445,32 +542,27 @@ def main():
         st.session_state.validation_results = None
     if 'excluded_points' not in st.session_state:
         st.session_state.excluded_points = set()
+    if 'selected_model' not in st.session_state:
+        st.session_state.selected_model = "ensemble"
     
     # Создание вкладок
     tab1, tab2, tab3 = st.tabs(["📊 Данные и модель", "🧮 Калькулятор", "📈 Валидация модели"])
     
     # Боковая панель
-    st.sidebar.header("📁 Управление проектом")
+    st.sidebar.header("🎯 Настройки модели")
     
-    # Загрузка/сохранение проекта
-    if st.session_state.analyzer is not None and st.session_state.current_data is not None:
-        if st.sidebar.button("💾 Сохранить проект"):
-            project_data = {
-                'analyzer': st.session_state.analyzer.__dict__,
-                'current_data': st.session_state.current_data.to_dict()
-            }
-            
-            project_json = json.dumps(project_data, indent=2)
-            st.sidebar.download_button(
-                label="Скачать проект",
-                data=project_json,
-                file_name=f"sigma_phase_project_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
-                mime="application/json"
-            )
-    
-    # Настройки обработки выбросов
-    st.sidebar.header("🎯 Настройки обработки выбросов")
-    remove_outliers = st.sidebar.checkbox("Удалять выбросы", value=True)
+    # Выбор модели
+    model_type = st.sidebar.selectbox(
+        "Выберите модель",
+        ["avrami_saturation", "power_law", "logistic", "ensemble"],
+        format_func=lambda x: {
+            "avrami_saturation": "Аврами с насыщением",
+            "power_law": "Степенная модель",
+            "logistic": "Логистическая модель", 
+            "ensemble": "Ансамблевая модель"
+        }[x],
+        key="model_selector"
+    )
     
     # Пример данных
     sample_data = pd.DataFrame({
@@ -485,232 +577,153 @@ def main():
     
     uploaded_file = st.sidebar.file_uploader(
         "Загрузите файл с экспериментальными данными",
-        type=['csv', 'xlsx', 'xls'],
-        help="Поддерживаемые форматы: CSV, Excel (.xlsx, .xls)"
+        type=['csv', 'xlsx', 'xls']
     )
     
-    # Обработка загруженного файла
     if uploaded_file is not None:
         data = read_uploaded_file(uploaded_file)
-        
         if data is not None:
-            # Нормализуем названия колонок
             data = DataValidator.normalize_column_names(data)
-            
-            # Валидируем данные
             is_valid, message = DataValidator.validate_data(data)
-            
             if is_valid:
-                # Округляем значения до тысячных
                 data['f_exp (%)'] = data['f_exp (%)'].round(3)
                 st.session_state.current_data = data
-                st.sidebar.success("✅ Данные успешно загружены и валидированы!")
-                st.sidebar.info(f"Загружено {len(data)} строк")
-            else:
-                st.sidebar.error(f"❌ {message}")
-                # Показываем какие колонки есть в файле
-                st.sidebar.info(f"Найденные колонки: {list(data.columns)}")
+                st.sidebar.success("✅ Данные успешно загружены!")
     
-    # Если данных нет, используем пример
     if st.session_state.current_data is None:
         st.session_state.current_data = sample_data
 
     # ВКЛАДКА 1: Данные и модель
     with tab1:
-        st.header("📊 Экспериментальные данные")
+        st.header("📊 Управление данными")
         
-        # Показываем информацию о колонках
-        if st.session_state.current_data is not None:
-            st.info(f"**Структура данных:** {len(st.session_state.current_data)} строк × {len(st.session_state.current_data.columns)} колонок")
-            st.write("**Загруженные колонки:**", list(st.session_state.current_data.columns))
+        st.info("💡 **Снимите галочки с точек, которые хотите исключить из анализа**")
         
-        # Создаем копию данных для редактирования с чекбоксами
+        # Создаем копию данных с чекбоксами
         display_data = st.session_state.current_data.copy()
-        display_data['Включить'] = [i not in st.session_state.excluded_points for i in range(len(display_data))]
+        display_data['№'] = range(1, len(display_data) + 1)
+        display_data['Использовать'] = [i not in st.session_state.excluded_points for i in range(len(display_data))]
         
-        # Редактор данных с возможностью исключения точек
-        edited_data = st.data_editor(
+        # Показываем таблицу с чекбоксами
+        edited_df = st.data_editor(
             display_data,
             column_config={
-                "Включить": st.column_config.CheckboxColumn(
-                    "Включить в анализ",
-                    help="Снимите галочку чтобы исключить точку из анализа"
+                "№": st.column_config.NumberColumn(width="small"),
+                "Использовать": st.column_config.CheckboxColumn(
+                    width="small",
+                    help="Снимите галочку чтобы исключить точку"
                 ),
-                "f_exp (%)": st.column_config.NumberColumn(format="%.3f"),
-                "G": st.column_config.NumberColumn(format="%d"),
-                "T": st.column_config.NumberColumn(format="%.1f"),
-                "t": st.column_config.NumberColumn(format="%d")
+                "G": st.column_config.NumberColumn(width="small"),
+                "T": st.column_config.NumberColumn(width="small"),
+                "t": st.column_config.NumberColumn(width="small"),
+                "f_exp (%)": st.column_config.NumberColumn(format="%.3f", width="small")
             },
-            disabled=["G", "T", "t", "f_exp (%)"],
-            use_container_width=True
+            column_order=["№", "Использовать", "G", "T", "t", "f_exp (%)"],
+            use_container_width=True,
+            height=400
         )
         
         # Обновляем список исключенных точек
         new_excluded = set()
-        for i, included in enumerate(edited_data['Включить']):
-            if not included:
+        for i, used in enumerate(edited_df['Использовать']):
+            if not used:
                 new_excluded.add(i)
         
         if new_excluded != st.session_state.excluded_points:
             st.session_state.excluded_points = new_excluded
             st.session_state.analyzer = None
             st.session_state.validation_results = None
-            st.rerun()
         
-        # Статистика данных
-        total_points = len(st.session_state.current_data)
-        excluded_count = len(st.session_state.excluded_points)
-        included_count = total_points - excluded_count
+        # Статистика
+        total = len(display_data)
+        excluded = len(st.session_state.excluded_points)
+        included = total - excluded
         
         col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Всего точек", total_points)
-        with col2:
-            st.metric("Включено в анализ", included_count)
-        with col3:
-            st.metric("Исключено", excluded_count)
+        col1.metric("Всего точек", total)
+        col2.metric("Используется", included, delta=f"-{excluded}" if excluded > 0 else None)
+        col3.metric("Исключено", excluded)
         
-        if excluded_count > 0:
-            st.info(f"Исключенные точки: {sorted(st.session_state.excluded_points)}")
-            
-            if st.button("🔄 Включить все точки", key="include_all"):
+        if excluded > 0:
+            st.warning(f"Исключенные точки: {[i+1 for i in sorted(st.session_state.excluded_points)]}")
+            if st.button("🔄 Включить все точки"):
                 st.session_state.excluded_points = set()
-                st.session_state.analyzer = None
-                st.session_state.validation_results = None
                 st.rerun()
         
-        # Анализ данных
-        st.header("🔍 Анализ данных")
-        
-        if st.session_state.current_data is not None and 'G' in st.session_state.current_data.columns:
-            # Информация о зернах в данных
-            unique_grain_numbers = sorted(st.session_state.current_data['G'].unique())
-            
-            st.subheader("📐 Характеристики зерен в данных")
-            cols = st.columns(min(5, len(unique_grain_numbers)))
-            
-            for i, grain_num in enumerate(unique_grain_numbers):
-                with cols[i % 5]:
-                    diameter = GrainSizeConverter.grain_number_to_diameter(grain_num)
-                    boundary_density = GrainSizeConverter.calculate_grain_boundary_density(grain_num)
-                    activation_factor = GrainSizeConverter.calculate_activation_energy_factor(grain_num)
-                    
-                    st.metric(
-                        f"G = {grain_num}",
-                        f"{diameter*1000:.1f} мкм",
-                        f"Плотность: {boundary_density:.0f} мм²/мм³"
-                    )
-                    st.caption(f"Коэф. активации: {activation_factor:.3f}")
-        
-        # Подбор модели
-        st.header("🎯 Подбор параметров модели")
-        
-        # Подготовка данных для анализа (исключаем выбранные точки)
+        # Подготовка данных для анализа
         analysis_data = st.session_state.current_data.copy()
         if st.session_state.excluded_points:
             analysis_data = analysis_data.drop(list(st.session_state.excluded_points)).reset_index(drop=True)
         
-        if st.button("🚀 Запустить подбор параметров", use_container_width=True):
-            if analysis_data is not None and all(col in analysis_data.columns for col in ['G', 'T', 't', 'f_exp (%)']):
-                analyzer = AdvancedSigmaPhaseAnalyzer()
-                
-                with st.spinner("Подбираем параметры ансамблевой модели..."):
-                    success = analyzer.fit_ensemble_model(analysis_data)
+        # Подбор модели
+        st.header("🎯 Подбор параметров модели")
+        
+        st.write(f"**Выбрана модель:** {{'avrami_saturation': 'Аврами с насыщением', 'power_law': 'Степенная', 'logistic': 'Логистическая', 'ensemble': 'Ансамблевая'}[model_type]}")
+        
+        if st.button("🚀 Обучить модель", type="primary", use_container_width=True):
+            if len(analysis_data) < 5:
+                st.error("❌ Слишком мало данных для обучения. Нужно как минимум 5 точек.")
+            else:
+                analyzer = SigmaPhaseAnalyzer()
+                with st.spinner("Подбираем параметры модели..."):
+                    success = analyzer.fit_model(analysis_data, model_type)
                 
                 if success:
                     st.session_state.analyzer = analyzer
                     validation_results = analyzer.calculate_validation_metrics(analysis_data)
                     st.session_state.validation_results = validation_results
-                    
-                    st.success(f"✅ Модель успешно обучена! R² = {analyzer.R2:.4f}")
+                    st.success(f"✅ Модель обучена! R² = {analyzer.R2:.4f}")
                     st.rerun()
-            else:
-                st.error("❌ Для подбора модели необходимы колонки: G, T, t, f_exp (%)")
         
-        # Показ результатов модели
+        # Показ результатов
         if st.session_state.analyzer is not None:
             analyzer = st.session_state.analyzer
             
-            # Параметры модели
             st.subheader("📈 Параметры модели")
-            
-            if analyzer.params is not None:
+            if analyzer.model_type == "ensemble":
                 f_max, K0, Q, n, alpha, w, beta = analyzer.params
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("f_max", f"{f_max:.3f}%")
-                    st.metric("K₀", f"{K0:.2e}")
-                with col2:
-                    st.metric("Q", f"{Q/1000:.1f} кДж/моль")
-                    st.metric("n", f"{n:.3f}")
-                with col3:
-                    st.metric("α", f"{alpha:.3f}")
-                    st.metric("w", f"{w:.3f}")
-                
-                st.metric("β", f"{beta:.0f}")
-                
-                # Метрики качества
-                st.subheader("📊 Метрики качества модели")
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.metric("R²", f"{analyzer.R2:.4f}")
-                with col2:
-                    st.metric("RMSE", f"{analyzer.rmse:.2f}%")
+                cols = st.columns(4)
+                cols[0].metric("f_max", f"{f_max:.3f}%")
+                cols[1].metric("K₀", f"{K0:.2e}")
+                cols[2].metric("Q", f"{Q/1000:.1f} кДж/моль")
+                cols[3].metric("n", f"{n:.3f}")
+                cols[0].metric("α", f"{alpha:.3f}")
+                cols[1].metric("w", f"{w:.3f}")
+                cols[2].metric("β", f"{beta:.0f}")
+            
+            st.subheader("📊 Метрики качества")
+            col1, col2 = st.columns(2)
+            col1.metric("R²", f"{analyzer.R2:.4f}")
+            col2.metric("RMSE", f"{analyzer.rmse:.3f}%")
+            
+            st.subheader("🧮 Формула модели")
+            st.markdown(analyzer.final_formula)
 
     # ВКЛАДКА 2: Калькулятор
     with tab2:
-        st.header("🧮 Калькулятор температуры эксплуатации")
+        st.header("🧮 Калькулятор температуры")
         
         if st.session_state.analyzer is not None:
             analyzer = st.session_state.analyzer
             
             col1, col2, col3 = st.columns(3)
-            
             with col1:
-                G_input = st.number_input("Номер зерна (G)", 
-                                        min_value=-3.0, max_value=14.0, 
-                                        value=8.0, step=0.1)
+                G_input = st.number_input("Номер зерна (G)", value=8.0, min_value=-3.0, max_value=14.0, step=0.1)
             with col2:
-                sigma_input = st.number_input("Содержание сигма-фазы f_exp (%)", 
-                                            min_value=0.0, max_value=50.0,
-                                            value=2.0, step=0.1,
-                                            format="%.3f")
+                sigma_input = st.number_input("Содержание сигма-фазы (%)", value=2.0, min_value=0.1, max_value=20.0, step=0.1)
             with col3:
-                t_input = st.number_input("Время эксплуатации t (ч)", 
-                                        min_value=100, max_value=500000,
-                                        value=4000, step=1000)
-
-            # Информация о диапазоне
-            if t_input > 100000:
-                st.info("🔍 Расчет выполняется для длительной эксплуатации (свыше 100000 часов)")
+                t_input = st.number_input("Время (ч)", value=4000, min_value=100, max_value=500000, step=100)
             
-            if st.button("🔍 Рассчитать температуру", key="calc_temp"):
+            if st.button("🔍 Рассчитать температуру", use_container_width=True):
                 try:
-                    T_celsius = analyzer.predict_temperature(G_input, sigma_input, t_input)
-                    
-                    if T_celsius is not None:
-                        st.success(f"""
-                        ### Результат расчета:
-                        - **Температура эксплуатации:** {T_celsius:.1f}°C
-                        - При номере зерна: {G_input}
-                        - Содержании сигма-фазы: {sigma_input:.3f}%
-                        - Наработке: {t_input} ч
-                        """)
-                        
-                        # Дополнительная информация для больших времен
-                        if t_input > 200000:
-                            st.info("💡 **Примечание:** Расчет для времени эксплуатации свыше 200000 часов требует осторожной интерпретации результатов")
-                        
-                    else:
-                        st.error("Не удалось рассчитать температуру. Проверьте входные параметры.")
-                        
+                    T_pred = analyzer.predict_temperature(G_input, sigma_input, t_input)
+                    st.success(f"**Расчетная температура эксплуатации:** {T_pred:.1f}°C")
                 except Exception as e:
-                    st.error(f"Ошибка при расчете: {str(e)}")
+                    st.error(f"Ошибка расчета: {e}")
         else:
             st.info("👆 Сначала обучите модель на вкладке 'Данные и модель'")
 
-    # ВКЛАДКА 3: Валидация модели
+    # ВКЛАДКА 3: Валидация
     with tab3:
         st.header("📈 Валидация модели")
         
@@ -718,130 +731,49 @@ def main():
             analyzer = st.session_state.analyzer
             validation = st.session_state.validation_results
             
-            # Метрики валидации
-            st.subheader("📊 Метрики качества модели")
+            # Метрики
             metrics = validation['metrics']
+            st.subheader("📊 Метрики качества")
+            cols = st.columns(4)
+            cols[0].metric("R²", f"{metrics['R2']:.4f}")
+            cols[1].metric("MAE", f"{metrics['MAE']:.3f}%")
+            cols[2].metric("RMSE", f"{metrics['RMSE']:.3f}%")
+            cols[3].metric("MAPE", f"{metrics['MAPE']:.2f}%")
             
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("R²", f"{metrics['R2']:.4f}")
-                st.metric("MAE", f"{metrics['MAE']:.3f}%")
-            with col2:
-                st.metric("RMSE", f"{metrics['RMSE']:.3f}%")
-            with col3:
-                st.metric("MAPE", f"{metrics['MAPE']:.2f}%")
-            with col4:
-                st.metric("Количество точек", f"{len(validation['data'])}")
+            # График
+            fig = go.Figure()
+            fig.add_trace(go.Scatter(
+                x=validation['data']['f_exp (%)'],
+                y=validation['predictions'],
+                mode='markers',
+                name='Предсказания',
+                marker=dict(size=10, color='blue')
+            ))
+            max_val = max(validation['data']['f_exp (%)'].max(), validation['predictions'].max())
+            fig.add_trace(go.Scatter(
+                x=[0, max_val], y=[0, max_val],
+                mode='lines',
+                name='Идеально',
+                line=dict(color='red', dash='dash')
+            ))
+            fig.update_layout(
+                title='Предсказание vs Эксперимент',
+                xaxis_title='Эксперимент (%)',
+                yaxis_title='Модель (%)'
+            )
+            st.plotly_chart(fig, use_container_width=True)
             
-            # Оценка качества
-            if metrics['MAPE'] < 15:
-                st.success("✅ Отличное качество модели!")
-            elif metrics['MAPE'] < 25:
-                st.warning("⚠️ Удовлетворительное качество модели")
-            else:
-                st.error("❌ Попробуйте исключить больше точек или проверить данные")
+            # Таблица
+            st.subheader("📋 Детальное сравнение")
+            comp_df = validation['data'].copy()
+            comp_df['f_pred (%)'] = validation['predictions'].round(3)
+            comp_df['Ошибка (%)'] = validation['residuals'].round(3)
+            comp_df['Отн. ошибка (%)'] = validation['relative_errors'].round(1)
+            st.dataframe(comp_df, use_container_width=True)
             
-            # Финальная формула
-            st.subheader("🧮 Финальная формула модели")
-            st.markdown(analyzer.final_formula)
-            
-            # Таблица сравнения
-            st.subheader("📋 Сравнение экспериментальных и расчетных значений")
-            
-            comparison_df = validation['data'].copy()
-            comparison_df['f_pred (%)'] = validation['predictions']
-            comparison_df['Абс. ошибка (%)'] = validation['residuals']
-            comparison_df['Отн. ошибка (%)'] = validation['relative_errors']
-            comparison_df['f_pred (%)'] = comparison_df['f_pred (%)'].round(3)
-            comparison_df['Абс. ошибка (%)'] = comparison_df['Абс. ошибка (%)'].round(3)
-            comparison_df['Отн. ошибка (%)'] = comparison_df['Отн. ошибка (%)'].round(1)
-            
-            st.dataframe(comparison_df, use_container_width=True)
-            
-            # Графики валидации
-            st.subheader("📈 Графики валидации")
-            
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                # График предсказания vs эксперимент
-                fig1 = go.Figure()
-                
-                fig1.add_trace(go.Scatter(
-                    x=validation['data']['f_exp (%)'],
-                    y=validation['predictions'],
-                    mode='markers',
-                    name='Точки данных',
-                    marker=dict(size=8, color='blue', opacity=0.6)
-                ))
-                
-                # Линия идеального предсказания
-                max_val = max(validation['data']['f_exp (%)'].max(), validation['predictions'].max())
-                fig1.add_trace(go.Scatter(
-                    x=[0, max_val],
-                    y=[0, max_val],
-                    mode='lines',
-                    name='Идеальное предсказание',
-                    line=dict(color='red', dash='dash')
-                ))
-                
-                fig1.update_layout(
-                    title='Предсказание vs Эксперимент',
-                    xaxis_title='Экспериментальное значение f_exp (%)',
-                    yaxis_title='Расчетное значение f_pred (%)',
-                    showlegend=True
-                )
-                
-                st.plotly_chart(fig1, use_container_width=True)
-            
-            with col2:
-                # График остатков
-                fig2 = go.Figure()
-                
-                fig2.add_trace(go.Scatter(
-                    x=validation['predictions'],
-                    y=validation['residuals'],
-                    mode='markers',
-                    name='Остатки',
-                    marker=dict(size=8, color='green', opacity=0.6)
-                ))
-                
-                # Нулевая линия
-                fig2.add_trace(go.Scatter(
-                    x=[validation['predictions'].min(), validation['predictions'].max()],
-                    y=[0, 0],
-                    mode='lines',
-                    name='Нулевая линия',
-                    line=dict(color='red', dash='dash')
-                ))
-                
-                fig2.update_layout(
-                    title='Остатки модели',
-                    xaxis_title='Расчетное значение f_pred (%)',
-                    yaxis_title='Остаток (f_pred - f_exp) (%)',
-                    showlegend=True
-                )
-                
-                st.plotly_chart(fig2, use_container_width=True)
-            
-            # Статистика по ошибкам
-            st.subheader("📈 Статистика ошибок")
-            
-            abs_errors = np.abs(validation['residuals'])
-            rel_errors = np.abs(validation['relative_errors'])
-            
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Макс. абс. ошибка", f"{abs_errors.max():.3f}%")
-            with col2:
-                st.metric("Макс. отн. ошибка", f"{rel_errors.max():.2f}%")
-            with col3:
-                st.metric("Средняя абс. ошибка", f"{abs_errors.mean():.3f}%")
-            with col4:
-                st.metric("Средняя отн. ошибка", f"{rel_errors.mean():.2f}%")
-                
         else:
             st.info("👆 Сначала обучите модель на вкладке 'Данные и модель'")
 
 if __name__ == "__main__":
     main()
+    

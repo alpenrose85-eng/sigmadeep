@@ -217,16 +217,17 @@ class SigmaPhaseAnalyzer:
         self.outlier_info = None
         self.original_data = None
         self.clean_data = None
-        self.model_version = "2.0"
+        self.model_version = "3.0"  # Обновленная версия
         self.creation_date = datetime.now().isoformat()
         self.last_modified = datetime.now().isoformat()
-        self.use_advanced_model = True
+        self.model_type = "classic"  # classic или advanced
         
-    def fit_model(self, data, remove_outliers=True, outlier_method='iqr', contamination=0.1):
-        """Подгонка модели с опцией удаления выбросов"""
+    def fit_model(self, data, remove_outliers=True, outlier_method='iqr', contamination=0.1, model_type="classic"):
+        """Подгонка модели с выбором типа модели"""
         try:
             self.last_modified = datetime.now().isoformat()
             self.original_data = data.copy()
+            self.model_type = model_type
             
             if remove_outliers:
                 outlier_data, clean_data = self.detect_outliers(data, outlier_method, contamination)
@@ -254,24 +255,46 @@ class SigmaPhaseAnalyzer:
             t = self.clean_data['t'].values
             sigma_exp = self.clean_data['f_exp (%)'].values / 100.0  # Конвертация % в доли
             
-            # Усовершенствованная модель с плотностью границ
-            initial_guess = [1e10, 200000, 10000, 1.0, 550.0, 900.0, 0.1]
-            bounds = (
-                [1e5, 100000, 0, 0.1, 500.0, 850.0, 0.0],
-                [1e15, 500000, 50000, 4.0, 600.0, 950.0, 1.0]
-            )
-            
-            self.params, _ = curve_fit(
-                lambda x, K0, a, b, n, T_min, T_max, alpha: 
-                self.sigma_phase_model_advanced([K0, a, b, n, T_min, T_max, alpha], G, T_kelvin, t),
-                np.arange(len(G)), sigma_exp,
-                p0=initial_guess,
-                bounds=bounds,
-                maxfev=10000
-            )
+            if model_type == "classic":
+                # Классическая модель Джонсона-Меля-Авраами
+                initial_guess = [1e8, 200000, 0.5, 0.1]
+                bounds = (
+                    [1e5, 100000, 0.1, 0.01],
+                    [1e12, 400000, 2.0, 1.0]
+                )
+                
+                self.params, _ = curve_fit(
+                    lambda x, K0, Q, n, alpha: 
+                    self.sigma_phase_model_classic([K0, Q, n, alpha], G, T_kelvin, t),
+                    np.arange(len(G)), sigma_exp,
+                    p0=initial_guess,
+                    bounds=bounds,
+                    maxfev=10000
+                )
+                
+            else:  # advanced
+                # Усовершенствованная модель
+                initial_guess = [1e10, 200000, 10000, 1.0, 550.0, 900.0, 0.1]
+                bounds = (
+                    [1e5, 100000, 0, 0.1, 500.0, 850.0, 0.0],
+                    [1e15, 500000, 50000, 4.0, 600.0, 950.0, 1.0]
+                )
+                
+                self.params, _ = curve_fit(
+                    lambda x, K0, a, b, n, T_min, T_max, alpha: 
+                    self.sigma_phase_model_advanced([K0, a, b, n, T_min, T_max, alpha], G, T_kelvin, t),
+                    np.arange(len(G)), sigma_exp,
+                    p0=initial_guess,
+                    bounds=bounds,
+                    maxfev=10000
+                )
             
             # Расчет метрик качества
-            sigma_pred = self.sigma_phase_model_advanced(self.params, G, T_kelvin, t) * 100
+            if model_type == "classic":
+                sigma_pred = self.sigma_phase_model_classic(self.params, G, T_kelvin, t) * 100
+            else:
+                sigma_pred = self.sigma_phase_model_advanced(self.params, G, T_kelvin, t) * 100
+                
             sigma_exp_percent = sigma_exp * 100
             self.R2 = r2_score(sigma_exp_percent, sigma_pred)
             self.rmse = np.sqrt(mean_squared_error(sigma_exp_percent, sigma_pred))
@@ -280,7 +303,22 @@ class SigmaPhaseAnalyzer:
             
         except Exception as e:
             st.error(f"Ошибка при подгонке модели: {str(e)}")
+            st.error(f"Детали ошибки: {e}")
             return False
+    
+    def sigma_phase_model_classic(self, params, G, T, t):
+        """Классическая модель Джонсона-Меля-Авраами"""
+        K0, Q, n, alpha = params
+        R = 8.314  # Универсальная газовая постоянная
+        
+        # Упрощенное влияние размера зерна
+        grain_factor = 1 + alpha * (G - 5)  # Нормализуем относительно G=5
+        
+        K = K0 * np.exp(-Q / (R * T)) * grain_factor
+        
+        # Классическое уравнение кинетики
+        sigma = 1 - np.exp(-K * (t ** n))
+        return sigma
     
     def sigma_phase_model_advanced(self, params, G, T, t):
         """Усовершенствованная модель с учетом плотности границ зерен"""
@@ -354,26 +392,37 @@ class SigmaPhaseAnalyzer:
         sigma = sigma_percent / 100.0
         
         try:
-            K0, a, b, n, T_sigma_min, T_sigma_max, alpha = self.params
+            if self.model_type == "classic":
+                K0, Q, n, alpha = self.params
+                grain_factor = 1 + alpha * (G - 5)
+                K_eff = K0 * grain_factor
+                
+                term = -np.log(1 - sigma) / (K_eff * (t ** n))
+                if term <= 0:
+                    return None
+                
+                T_kelvin = -Q / (R * np.log(term))
+                T_celsius = T_kelvin - 273.15
+                
+            else:  # advanced
+                K0, a, b, n, T_sigma_min, T_sigma_max, alpha = self.params
+                grain_boundary_factor = GrainSizeConverter.calculate_activation_energy_factor(G)
+                Q_effective = (a + b * G) * (1 + alpha * (grain_boundary_factor - 1))
+                
+                term = -np.log(1 - sigma) / (K0 * (t ** n))
+                if term <= 0:
+                    return None
+                
+                T_kelvin = -Q_effective / (R * np.log(term))
+                T_celsius = T_kelvin - 273.15
+                
+                # Применяем температурные ограничения
+                if T_celsius < T_sigma_min:
+                    return T_sigma_min
+                elif T_celsius > T_sigma_max:
+                    return T_sigma_max
             
-            # Упрощенный расчет для единичного значения
-            grain_boundary_factor = GrainSizeConverter.calculate_activation_energy_factor(G)
-            Q_effective = (a + b * G) * (1 + alpha * (grain_boundary_factor - 1))
-            
-            term = -np.log(1 - sigma) / (K0 * (t ** n))
-            if term <= 0:
-                return None
-            
-            T_kelvin = -Q_effective / (R * np.log(term))
-            T_celsius = T_kelvin - 273.15
-            
-            # Применяем температурные ограничения
-            if T_celsius < T_sigma_min:
-                return T_sigma_min
-            elif T_celsius > T_sigma_max:
-                return T_sigma_max
-            else:
-                return T_celsius
+            return T_celsius
                 
         except:
             return None
@@ -387,37 +436,49 @@ class SigmaPhaseAnalyzer:
         sigma = sigma_percent / 100.0
         
         try:
-            K0, a, b, n, T_sigma_min, T_sigma_max, alpha = self.params
+            if self.model_type == "classic":
+                K0, Q, n, alpha = self.params
+                grain_factor = 1 + alpha * (G - 5)
+                K_eff = K0 * grain_factor
+                
+                # Защита от численных ошибок
+                if sigma >= 1.0:
+                    sigma = 0.999
+                
+                term = -np.log(1 - sigma) / (K_eff * (t ** n))
+                
+                if term <= 0:
+                    return 500  # Минимальная температура
+                
+                T_kelvin = -Q / (R * np.log(term))
+                T_celsius = T_kelvin - 273.15
+                
+            else:  # advanced
+                K0, a, b, n, T_sigma_min, T_sigma_max, alpha = self.params
+                grain_boundary_factor = GrainSizeConverter.calculate_activation_energy_factor(G)
+                Q_effective = (a + b * G) * (1 + alpha * (grain_boundary_factor - 1))
+                
+                if sigma >= 1.0:
+                    sigma = 0.999
+                
+                term = -np.log(1 - sigma) / (K0 * (t ** n))
+                
+                if term <= 0:
+                    return T_sigma_min
+                
+                T_kelvin = -Q_effective / (R * np.log(term))
+                T_celsius = T_kelvin - 273.15
+                
+                if T_celsius < T_sigma_min:
+                    return T_sigma_min
+                elif T_celsius > T_sigma_max:
+                    return T_sigma_max
             
-            # Упрощенный расчет для единичного значения
-            grain_boundary_factor = GrainSizeConverter.calculate_activation_energy_factor(G)
-            Q_effective = (a + b * G) * (1 + alpha * (grain_boundary_factor - 1))
-            
-            # Защита от численных ошибок при очень больших временах
-            if sigma >= 1.0:
-                sigma = 0.999  # Ограничиваем для избежания log(0)
-            
-            term = -np.log(1 - sigma) / (K0 * (t ** n))
-            
-            if term <= 0:
-                # Для очень больших времен возвращаем минимальную температуру
-                return T_sigma_min
-            
-            T_kelvin = -Q_effective / (R * np.log(term))
-            T_celsius = T_kelvin - 273.15
-            
-            # Применяем температурные ограничения
-            if T_celsius < T_sigma_min:
-                return T_sigma_min
-            elif T_celsius > T_sigma_max:
-                return T_sigma_max
-            else:
-                return T_celsius
+            return T_celsius
                 
         except (ValueError, ZeroDivisionError) as e:
-            # При численных ошибках возвращаем граничное значение
             st.warning(f"⚠️ При расчете для t={t} ч возникла численная ошибка. Используется минимальная температура.")
-            return T_sigma_min
+            return 500
     
     def calculate_validation_metrics(self, data):
         """Расчет метрик валидации на данных"""
@@ -431,11 +492,26 @@ class SigmaPhaseAnalyzer:
         sigma_exp = data['f_exp (%)'].values
         
         # Предсказание модели
-        sigma_pred = self.sigma_phase_model_advanced(self.params, G, T_kelvin, t) * 100
+        if self.model_type == "classic":
+            sigma_pred = self.sigma_phase_model_classic(self.params, G, T_kelvin, t) * 100
+        else:
+            sigma_pred = self.sigma_phase_model_advanced(self.params, G, T_kelvin, t) * 100
         
         # Расчет отклонений
         residuals = sigma_pred - sigma_exp
         relative_errors = (residuals / sigma_exp) * 100
+        
+        # Защита от бесконечных ошибок
+        finite_mask = np.isfinite(relative_errors)
+        if not np.all(finite_mask):
+            st.warning("⚠️ Обнаружены бесконечные относительные ошибки (деление на ноль)")
+            relative_errors = relative_errors[finite_mask]
+            residuals = residuals[finite_mask]
+            sigma_exp_filtered = sigma_exp[finite_mask]
+            sigma_pred_filtered = sigma_pred[finite_mask]
+        else:
+            sigma_exp_filtered = sigma_exp
+            sigma_pred_filtered = sigma_pred
         
         # Статистика ошибок
         mae = np.mean(np.abs(residuals))
@@ -453,7 +529,7 @@ class SigmaPhaseAnalyzer:
                 'MSE': mse,
                 'RMSE': rmse,
                 'MAPE': mape,
-                'R2': r2_score(sigma_exp, sigma_pred)
+                'R2': r2_score(sigma_exp_filtered, sigma_pred_filtered)
             }
         }
         
@@ -530,15 +606,23 @@ def main():
             )
     
     # Настройки обработки выбросов
-    st.sidebar.header("🎯 Настройки обработки выбросов")
+    st.sidebar.header("🎯 Настройки модели")
     remove_outliers = st.sidebar.checkbox("Удалять выбросы", value=True)
+    
+    # Выбор типа модели
+    model_type = st.sidebar.selectbox(
+        "Тип модели",
+        ["classic", "advanced"],
+        format_func=lambda x: "Классическая (JMA)" if x == "classic" else "Усовершенствованная",
+        help="Классическая модель Джонсона-Меля-Авраами или усовершенствованная модель"
+    )
     
     # Пример данных
     sample_data = pd.DataFrame({
-        'G': [3, 3, 5, 5, 8, 8, 9, 9, 3, 5, 8],
-        'T': [600, 650, 600, 700, 650, 700, 600, 700, 600, 650, 750],
-        't': [2000, 4000, 4000, 2000, 6000, 4000, 8000, 6000, 2000, 4000, 4000],
-        'f_exp (%)': [5.2, 12.5, 8.1, 15.3, 18.7, 25.1, 22.4, 35.2, 12.8, 25.6, 2.1]
+        'G': [8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
+        'T': [600, 600, 600, 600, 650, 650, 650, 650, 600, 600, 600, 600, 650, 650, 650, 650, 600, 600, 600, 600, 650, 650, 650, 650, 700, 700],
+        't': [2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000],
+        'f_exp (%)': [1.76, 0.68, 0.94, 1.09, 0.67, 1.2, 1.48, 1.13, 0.87, 1.28, 2.83, 3.25, 1.88, 2.29, 3.25, 2.89, 1.261, 2.04, 2.38, 3.3, 3.2, 4.26, 5.069, 5.41, 3.3, 5.0]
     })
     
     # Загрузка данных
@@ -633,6 +717,10 @@ def main():
                     st.caption(f"Коэф. активации: {activation_factor:.3f}")
         
         # Кнопка подбора параметров модели
+        st.header("🎯 Подбор параметров модели")
+        
+        st.info(f"**Выбранный тип модели:** {'Классическая (Джонсон-Мель-Авраами)' if model_type == 'classic' else 'Усовершенствованная'}")
+        
         if st.button("🎯 Подобрать параметры модели", use_container_width=True):
             if st.session_state.current_data is not None and all(col in st.session_state.current_data.columns for col in ['G', 'T', 't', 'f_exp (%)']):
                 analyzer = SigmaPhaseAnalyzer()
@@ -640,7 +728,8 @@ def main():
                 with st.spinner("Идет подбор параметров модели..."):
                     success = analyzer.fit_model(
                         st.session_state.current_data, 
-                        remove_outliers=remove_outliers
+                        remove_outliers=remove_outliers,
+                        model_type=model_type
                     )
                 
                 if success:
@@ -663,19 +752,35 @@ def main():
             st.subheader("📈 Параметры модели")
             
             if analyzer.params is not None:
-                K0, a, b, n, T_sigma_min, T_sigma_max, alpha = analyzer.params
-                
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("K₀", f"{K0:.2e}")
-                    st.metric("a", f"{a:.2f}")
-                with col2:
-                    st.metric("b", f"{b:.2f}")
-                    st.metric("n", f"{n:.3f}")
-                with col3:
-                    st.metric("α", f"{alpha:.3f}")
-                
-                st.metric("Температурный диапазон", f"{T_sigma_min:.1f}°C - {T_sigma_max:.1f}°C")
+                if analyzer.model_type == "classic":
+                    K0, Q, n, alpha = analyzer.params
+                    
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("K₀", f"{K0:.2e}")
+                    with col2:
+                        st.metric("Q", f"{Q/1000:.1f} кДж/моль")
+                    with col3:
+                        st.metric("n", f"{n:.3f}")
+                    with col4:
+                        st.metric("α", f"{alpha:.3f}")
+                        
+                    st.info("**Классическая модель Джонсона-Меля-Авраами**")
+                    
+                else:
+                    K0, a, b, n, T_sigma_min, T_sigma_max, alpha = analyzer.params
+                    
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("K₀", f"{K0:.2e}")
+                        st.metric("a", f"{a:.2f}")
+                    with col2:
+                        st.metric("b", f"{b:.2f}")
+                        st.metric("n", f"{n:.3f}")
+                    with col3:
+                        st.metric("α", f"{alpha:.3f}")
+                    
+                    st.metric("Температурный диапазон", f"{T_sigma_min:.1f}°C - {T_sigma_max:.1f}°C")
                 
                 # Метрики качества
                 st.subheader("📊 Метрики качества модели")
@@ -697,11 +802,11 @@ def main():
             with col1:
                 G_input = st.number_input("Номер зерна (G)", 
                                         min_value=-3.0, max_value=14.0, 
-                                        value=5.0, step=0.1)
+                                        value=8.0, step=0.1)
             with col2:
                 sigma_input = st.number_input("Содержание сигма-фазы f_exp (%)", 
                                             min_value=0.0, max_value=50.0,
-                                            value=10.0, step=0.1,
+                                            value=2.0, step=0.1,
                                             format="%.3f")
             with col3:
                 t_input = st.number_input("Время эксплуатации t (ч)", 
@@ -733,11 +838,6 @@ def main():
                         if t_input > 200000:
                             st.info("💡 **Примечание:** Расчет для времени эксплуатации свыше 200000 часов требует осторожной интерпретации результатов")
                         
-                        # Проверка на границы диапазона
-                        if T_celsius <= T_sigma_min + 10:
-                            st.warning("⚠️ Расчетная температура близка к нижней границе образования сигма-фазы")
-                        elif T_celsius >= T_sigma_max - 10:
-                            st.warning("⚠️ Расчетная температура близка к верхней границе растворения сигма-фазы")
                     else:
                         st.error("Не удалось рассчитать температуру. Проверьте входные параметры.")
                         
@@ -769,6 +869,14 @@ def main():
                 st.metric("MAPE", f"{metrics['MAPE']:.2f}%")
             with col4:
                 st.metric("Количество точек", f"{len(validation['data'])}")
+            
+            # Оценка качества
+            if metrics['MAPE'] < 10:
+                st.success("✅ Отличное качество модели (MAPE < 10%)")
+            elif metrics['MAPE'] < 20:
+                st.warning("⚠️ Удовлетворительное качество модели (MAPE < 20%)")
+            else:
+                st.error("❌ Низкое качество модели (MAPE > 20%). Рекомендуется проверить данные или выбрать другую модель.")
             
             # Таблица сравнения
             st.subheader("📋 Сравнение экспериментальных и расчетных значений")

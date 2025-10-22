@@ -27,6 +27,174 @@ st.markdown("""
 ### Определение температурной зависимости по содержанию сигма-фазы, времени эксплуатации и номеру зерна
 """)
 
+class GrainSizeConverter:
+    """Класс для преобразования номера зерна в физические параметры по ГОСТ 5639-82"""
+    
+    # Данные из ГОСТ 5639-82 (на основе предоставленной таблицы)
+    GRAIN_DATA = {
+        -3: {'area_mm2': 1.000, 'diameter_mm': 1.000, 'conditional_diameter_mm': 0.875, 'grains_per_mm2': 1.0},
+        -2: {'area_mm2': 0.500, 'diameter_mm': 0.707, 'conditional_diameter_mm': 0.650, 'grains_per_mm2': 2.8},
+        -1: {'area_mm2': 0.250, 'diameter_mm': 0.500, 'conditional_diameter_mm': 0.444, 'grains_per_mm2': 8.0},
+        0:  {'area_mm2': 0.125, 'diameter_mm': 0.353, 'conditional_diameter_mm': 0.313, 'grains_per_mm2': 22.6},
+        1:  {'area_mm2': 0.0625, 'diameter_mm': 0.250, 'conditional_diameter_mm': 0.222, 'grains_per_mm2': 64.0},
+        2:  {'area_mm2': 0.0312, 'diameter_mm': 0.177, 'conditional_diameter_mm': 0.157, 'grains_per_mm2': 181.0},
+        3:  {'area_mm2': 0.0156, 'diameter_mm': 0.125, 'conditional_diameter_mm': 0.111, 'grains_per_mm2': 512.0},
+        4:  {'area_mm2': 0.00781, 'diameter_mm': 0.088, 'conditional_diameter_mm': 0.0783, 'grains_per_mm2': 1448.0},
+        5:  {'area_mm2': 0.00390, 'diameter_mm': 0.062, 'conditional_diameter_mm': 0.0553, 'grains_per_mm2': 4096.0},
+        6:  {'area_mm2': 0.00195, 'diameter_mm': 0.044, 'conditional_diameter_mm': 0.0391, 'grains_per_mm2': 11585.0},
+        7:  {'area_mm2': 0.00098, 'diameter_mm': 0.031, 'conditional_diameter_mm': 0.0267, 'grains_per_mm2': 32768.0},
+        8:  {'area_mm2': 0.00049, 'diameter_mm': 0.022, 'conditional_diameter_mm': 0.0196, 'grains_per_mm2': 92682.0},
+        9:  {'area_mm2': 0.000244, 'diameter_mm': 0.015, 'conditional_diameter_mm': 0.0138, 'grains_per_mm2': 262144.0},
+        10: {'area_mm2': 0.000122, 'diameter_mm': 0.011, 'conditional_diameter_mm': 0.0099, 'grains_per_mm2': 741485.0},
+        11: {'area_mm2': 0.000061, 'diameter_mm': 0.0079, 'conditional_diameter_mm': 0.0069, 'grains_per_mm2': 2097152.0},
+        12: {'area_mm2': 0.000030, 'diameter_mm': 0.0056, 'conditional_diameter_mm': 0.0049, 'grains_per_mm2': 5931008.0},
+        13: {'area_mm2': 0.000015, 'diameter_mm': 0.0039, 'conditional_diameter_mm': 0.0032, 'grains_per_mm2': 16777216.0},
+        14: {'area_mm2': 0.000008, 'diameter_mm': 0.0027, 'conditional_diameter_mm': 0.0027, 'grains_per_mm2': 47449064.0}
+    }
+    
+    @classmethod
+    def grain_number_to_area(cls, grain_number):
+        """Преобразование номера зерна в среднюю площадь сечения (мм²)"""
+        data = cls.GRAIN_DATA.get(grain_number)
+        if data:
+            return data['area_mm2']
+        else:
+            # Интерполяция для промежуточных значений
+            numbers = sorted(cls.GRAIN_DATA.keys())
+            if grain_number < numbers[0]:
+                return cls.GRAIN_DATA[numbers[0]]['area_mm2']
+            elif grain_number > numbers[-1]:
+                return cls.GRAIN_DATA[numbers[-1]]['area_mm2']
+            else:
+                # Находим ближайшие известные значения
+                lower = max([n for n in numbers if n <= grain_number])
+                upper = min([n for n in numbers if n >= grain_number])
+                if lower == upper:
+                    return cls.GRAIN_DATA[lower]['area_mm2']
+                # Линейная интерполяция в логарифмической шкале
+                log_area_lower = np.log(cls.GRAIN_DATA[lower]['area_mm2'])
+                log_area_upper = np.log(cls.GRAIN_DATA[upper]['area_mm2'])
+                fraction = (grain_number - lower) / (upper - lower)
+                log_area = log_area_lower + fraction * (log_area_upper - log_area_lower)
+                return np.exp(log_area)
+    
+    @classmethod
+    def grain_number_to_diameter(cls, grain_number, use_conditional=True):
+        """Преобразование номера зерна в диаметр (мм)"""
+        data = cls.GRAIN_DATA.get(grain_number)
+        if data:
+            return data['conditional_diameter_mm'] if use_conditional else data['diameter_mm']
+        else:
+            # Интерполяция для промежуточных значений
+            numbers = sorted(cls.GRAIN_DATA.keys())
+            if grain_number < numbers[0]:
+                return cls.GRAIN_DATA[numbers[0]]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[numbers[0]]['diameter_mm']
+            elif grain_number > numbers[-1]:
+                return cls.GRAIN_DATA[numbers[-1]]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[numbers[-1]]['diameter_mm']
+            else:
+                lower = max([n for n in numbers if n <= grain_number])
+                upper = min([n for n in numbers if n >= grain_number])
+                if lower == upper:
+                    return cls.GRAIN_DATA[lower]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[lower]['diameter_mm']
+                # Линейная интерполяция
+                diam_lower = cls.GRAIN_DATA[lower]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[lower]['diameter_mm']
+                diam_upper = cls.GRAIN_DATA[upper]['conditional_diameter_mm'] if use_conditional else cls.GRAIN_DATA[upper]['diameter_mm']
+                fraction = (grain_number - lower) / (upper - lower)
+                return diam_lower + fraction * (diam_upper - diam_lower)
+    
+    @classmethod
+    def grain_number_to_grains_per_mm2(cls, grain_number):
+        """Преобразование номера зерна в количество зерен на 1 мм²"""
+        data = cls.GRAIN_DATA.get(grain_number)
+        if data:
+            return data['grains_per_mm2']
+        else:
+            # Интерполяция для промежуточных значений
+            numbers = sorted(cls.GRAIN_DATA.keys())
+            if grain_number < numbers[0]:
+                return cls.GRAIN_DATA[numbers[0]]['grains_per_mm2']
+            elif grain_number > numbers[-1]:
+                return cls.GRAIN_DATA[numbers[-1]]['grains_per_mm2']
+            else:
+                lower = max([n for n in numbers if n <= grain_number])
+                upper = min([n for n in numbers if n >= grain_number])
+                if lower == upper:
+                    return cls.GRAIN_DATA[lower]['grains_per_mm2']
+                # Линейная интерполяция в логарифмической шкале
+                log_count_lower = np.log(cls.GRAIN_DATA[lower]['grains_per_mm2'])
+                log_count_upper = np.log(cls.GRAIN_DATA[upper]['grains_per_mm2'])
+                fraction = (grain_number - lower) / (upper - lower)
+                log_count = log_count_lower + fraction * (log_count_upper - log_count_lower)
+                return np.exp(log_count)
+    
+    @classmethod
+    def calculate_grain_boundary_density(cls, grain_number):
+        """
+        Расчет плотности границ зерен (мм²/мм³)
+        Используем условный диаметр из ГОСТ
+        """
+        d = cls.grain_number_to_diameter(grain_number, use_conditional=True)  # мм
+        
+        # Для сферических зерен: Sv = 3/R = 6/D
+        Sv = 3.0 / (d / 2.0)  # мм²/мм³
+        
+        return Sv
+    
+    @classmethod
+    def calculate_effective_surface_area(cls, grain_number):
+        """
+        Расчет эффективной площади поверхности для зарождения сигма-фазы
+        Учитывает как границы зерен, так и плотность зерен
+        """
+        # Плотность границ зерен
+        boundary_density = cls.calculate_grain_boundary_density(grain_number)
+        
+        # Количество зерен на единицу объема (приблизительно)
+        grains_per_mm2 = cls.grain_number_to_grains_per_mm2(grain_number)
+        Nv = grains_per_mm2 ** (3/2)  # Преобразование 2D -> 3D
+        
+        # Эффективная площадь (комбинация границ и объема)
+        effective_area = boundary_density * (1 + 0.1 * np.log(Nv + 1))
+        
+        return effective_area
+    
+    @classmethod
+    def calculate_activation_energy_factor(cls, grain_number):
+        """
+        Коэффициент влияния размера зерна на энергию активации
+        Учитывает реальные геометрические параметры из ГОСТ
+        """
+        # Нормализуем относительно номера зерна 5 (базовый)
+        ref_grain = 5
+        Sv_ref = cls.calculate_effective_surface_area(ref_grain)
+        Sv_current = cls.calculate_effective_surface_area(grain_number)
+        
+        return Sv_current / Sv_ref
+    
+    @classmethod
+    def get_grain_info_table(cls):
+        """Получить таблицу с информацией о всех размерах зерен"""
+        grain_numbers = sorted(cls.GRAIN_DATA.keys())
+        table_data = []
+        
+        for gn in grain_numbers:
+            data = cls.GRAIN_DATA[gn]
+            boundary_density = cls.calculate_grain_boundary_density(gn)
+            effective_area = cls.calculate_effective_surface_area(gn)
+            activation_factor = cls.calculate_activation_energy_factor(gn)
+            
+            table_data.append({
+                'G': gn,
+                'Площадь_мм2': data['area_mm2'],
+                'Диаметр_мм': data['conditional_diameter_mm'],
+                'Зерен_на_мм2': data['grains_per_mm2'],
+                'Плотность_границ': boundary_density,
+                'Эффективная_площадь': effective_area,
+                'Коэффициент_активации': activation_factor
+            })
+        
+        return pd.DataFrame(table_data)
+
 class OutlierDetector:
     """Класс для обнаружения выбросов в экспериментальных данных"""
     
@@ -51,28 +219,33 @@ class OutlierDetector:
         labels = clf.fit_predict(features)
         return labels
 
-# Модифицированная модель KJMA с учетом температурных ограничений
-def sigma_phase_model(params, G, T, t):
+# Модифицированная модель с учетом плотности границ зерен
+def sigma_phase_model_advanced(params, G, T, t):
     """
-    Модель образования сигма-фазы на основе уравнения KJMA 
-    с учетом размера зерна и температурных ограничений
+    Усовершенствованная модель с учетом плотности границ зерен
     """
-    K0, a, b, n, T_sigma_min, T_sigma_max = params
+    K0, a, b, n, T_sigma_min, T_sigma_max, alpha = params
     R = 8.314  # Универсальная газовая постоянная
     
-    # Температурные ограничения (в Кельвинах)
-    T_min = T_sigma_min + 273.15  # Минимальная температура образования сигма-фазы
-    T_max = T_sigma_max + 273.15  # Максимальная температура растворения
+    # Температурные ограничения
+    T_min = T_sigma_min + 273.15
+    T_max = T_sigma_max + 273.15
     
     # Эффективная температура с учетом ограничений
     T_eff = np.where(T < T_min, T_min, T)
     T_eff = np.where(T_eff > T_max, T_max, T_eff)
     
-    # Температурный фактор (сигмоида для плавного перехода)
+    # Температурный фактор
     temp_factor = 1 / (1 + np.exp(-0.1 * (T - (T_min + 50)))) * 1 / (1 + np.exp(0.1 * (T - (T_max - 50))))
     
-    Q = a + b * G
-    K = K0 * np.exp(-Q / (R * T_eff)) * temp_factor
+    # Базовая энергия активации
+    Q_base = a + b * G
+    
+    # Влияние плотности границ зерен
+    grain_boundary_factor = np.array([GrainSizeConverter.calculate_activation_energy_factor(g) for g in G])
+    Q_effective = Q_base * (1 + alpha * (grain_boundary_factor - 1))
+    
+    K = K0 * np.exp(-Q_effective / (R * T_eff)) * temp_factor
     
     sigma = 1 - np.exp(-K * (t ** n))
     return sigma
@@ -85,20 +258,26 @@ class SigmaPhaseAnalyzer:
         self.outlier_info = None
         self.original_data = None
         self.clean_data = None
-        self.model_version = "1.1"
+        self.model_version = "2.0"
         self.creation_date = datetime.now().isoformat()
         self.last_modified = datetime.now().isoformat()
+        self.use_advanced_model = True
         
     def detect_outliers(self, data, method='iqr', contamination=0.1):
         """Обнаружение выбросов в данных"""
-        features = data[['Номер_зерна', 'Температура_K', 'Время_ч', 'Сигма_фаза_процент']].values
+        # Преобразуем температуру в Кельвины для анализа
+        T_kelvin = data['T'] + 273.15
+        features = np.column_stack([data['G'].values, T_kelvin.values, data['t'].values, data['f_exp (%)'].values])
         
         if method == 'iqr':
-            # Применяем IQR к каждому параметру отдельно
             outlier_flags = np.zeros(len(data), dtype=bool)
             
-            for i, col in enumerate(['Сигма_фаза_процент', 'Время_ч', 'Температура_K']):
-                values = data[col].values
+            for i, col in enumerate(['f_exp (%)', 't', 'T']):
+                if col == 'T':
+                    values = T_kelvin.values
+                else:
+                    values = data[col].values
+                    
                 Q1 = np.percentile(values, 25)
                 Q3 = np.percentile(values, 75)
                 IQR = Q3 - Q1
@@ -113,7 +292,6 @@ class SigmaPhaseAnalyzer:
             outlier_flags = labels == -1
         
         elif method == 'residual':
-            # Будем определять после первичной подгонки модели
             return None, data
         
         outlier_data = data[outlier_flags]
@@ -147,97 +325,135 @@ class SigmaPhaseAnalyzer:
                 }
             
             # Подготовка данных для подгонки
-            G = self.clean_data['Номер_зерна'].values
-            T = self.clean_data['Температура_K'].values
-            t = self.clean_data['Время_ч'].values
-            sigma_exp = self.clean_data['Сигма_фаза_процент'].values / 100.0  # Конвертация % в доли
+            G = self.clean_data['G'].values
+            T_celsius = self.clean_data['T'].values
+            T_kelvin = T_celsius + 273.15  # Конвертация в Кельвины
+            t = self.clean_data['t'].values
+            sigma_exp = self.clean_data['f_exp (%)'].values / 100.0  # Конвертация % в доли
             
-            # Начальные guess-значения параметров с температурными ограничениями
-            initial_guess = [1e10, 200000, 10000, 1.0, 550.0, 900.0]  # [K0, a, b, n, T_min_C, T_max_C]
-            
-            # Границы параметров
-            bounds = (
-                [1e5, 100000, 0, 0.1, 500.0, 850.0],    # нижние границы
-                [1e15, 500000, 50000, 4.0, 600.0, 950.0] # верхние границы
-            )
-            
-            # Подгонка параметров
-            self.params, _ = curve_fit(
-                lambda x, K0, a, b, n, T_min, T_max: sigma_phase_model([K0, a, b, n, T_min, T_max], G, T, t),
-                np.arange(len(G)), sigma_exp,
-                p0=initial_guess,
-                bounds=bounds,
-                maxfev=10000
-            )
+            if self.use_advanced_model:
+                # Усовершенствованная модель с плотностью границ
+                initial_guess = [1e10, 200000, 10000, 1.0, 550.0, 900.0, 0.1]
+                bounds = (
+                    [1e5, 100000, 0, 0.1, 500.0, 850.0, 0.0],
+                    [1e15, 500000, 50000, 4.0, 600.0, 950.0, 1.0]
+                )
+                
+                self.params, _ = curve_fit(
+                    lambda x, K0, a, b, n, T_min, T_max, alpha: 
+                    sigma_phase_model_advanced([K0, a, b, n, T_min, T_max, alpha], G, T_kelvin, t),
+                    np.arange(len(G)), sigma_exp,
+                    p0=initial_guess,
+                    bounds=bounds,
+                    maxfev=10000
+                )
+            else:
+                # Базовая модель (для обратной совместимости)
+                initial_guess = [1e10, 200000, 10000, 1.0, 550.0, 900.0]
+                bounds = (
+                    [1e5, 100000, 0, 0.1, 500.0, 850.0],
+                    [1e15, 500000, 50000, 4.0, 600.0, 950.0]
+                )
+                
+                # Простая модель без учета плотности границ
+                def simple_sigma_model(params, G, T_kelvin, t):
+                    K0, a, b, n, T_sigma_min, T_sigma_max = params
+                    R = 8.314
+                    T_min = T_sigma_min + 273.15
+                    T_max = T_sigma_max + 273.15
+                    
+                    T_eff = np.where(T_kelvin < T_min, T_min, T_kelvin)
+                    T_eff = np.where(T_eff > T_max, T_max, T_eff)
+                    
+                    temp_factor = 1 / (1 + np.exp(-0.1 * (T_kelvin - (T_min + 50)))) * 1 / (1 + np.exp(0.1 * (T_kelvin - (T_max - 50))))
+                    
+                    Q = a + b * G
+                    K = K0 * np.exp(-Q / (R * T_eff)) * temp_factor
+                    
+                    sigma = 1 - np.exp(-K * (t ** n))
+                    return sigma
+                
+                self.params, _ = curve_fit(
+                    lambda x, K0, a, b, n, T_min, T_max: 
+                    simple_sigma_model([K0, a, b, n, T_min, T_max], G, T_kelvin, t),
+                    np.arange(len(G)), sigma_exp,
+                    p0=initial_guess,
+                    bounds=bounds,
+                    maxfev=10000
+                )
             
             # Расчет метрик качества
-            sigma_pred = sigma_phase_model(self.params, G, T, t) * 100  # Обратно в проценты
+            if self.use_advanced_model:
+                sigma_pred = sigma_phase_model_advanced(self.params, G, T_kelvin, t) * 100
+            else:
+                # Используем простую модель для предсказания
+                def simple_sigma_model(params, G, T_kelvin, t):
+                    K0, a, b, n, T_sigma_min, T_sigma_max = params
+                    R = 8.314
+                    T_min = T_sigma_min + 273.15
+                    T_max = T_sigma_max + 273.15
+                    
+                    T_eff = np.where(T_kelvin < T_min, T_min, T_kelvin)
+                    T_eff = np.where(T_eff > T_max, T_max, T_eff)
+                    
+                    temp_factor = 1 / (1 + np.exp(-0.1 * (T_kelvin - (T_min + 50)))) * 1 / (1 + np.exp(0.1 * (T_kelvin - (T_max - 50))))
+                    
+                    Q = a + b * G
+                    K = K0 * np.exp(-Q / (R * T_eff)) * temp_factor
+                    
+                    sigma = 1 - np.exp(-K * (t ** n))
+                    return sigma
+                
+                sigma_pred = simple_sigma_model(self.params, G, T_kelvin, t) * 100
+                
             sigma_exp_percent = sigma_exp * 100
             self.R2 = r2_score(sigma_exp_percent, sigma_pred)
             self.rmse = np.sqrt(mean_squared_error(sigma_exp_percent, sigma_pred))
-            
-            # Если используется метод остатков, пересчитываем выбросы
-            if remove_outliers and outlier_method == 'residual':
-                residuals = np.abs(sigma_pred - sigma_exp_percent)
-                residual_threshold = np.mean(residuals) + 2 * np.std(residuals)
-                residual_outliers = residuals > residual_threshold
-                
-                if np.any(residual_outliers):
-                    outlier_data_residual = self.clean_data[residual_outliers]
-                    clean_data_residual = self.clean_data[~residual_outliers]
-                    
-                    # Переподгонка модели без выбросов по остаткам
-                    G_clean = clean_data_residual['Номер_зерна'].values
-                    T_clean = clean_data_residual['Температура_K'].values
-                    t_clean = clean_data_residual['Время_ч'].values
-                    sigma_exp_clean = clean_data_residual['Сигма_фаза_процент'].values / 100.0
-                    
-                    self.params, _ = curve_fit(
-                        lambda x, K0, a, b, n, T_min, T_max: sigma_phase_model([K0, a, b, n, T_min, T_max], G_clean, T_clean, t_clean),
-                        np.arange(len(G_clean)), sigma_exp_clean,
-                        p0=self.params,
-                        bounds=bounds,
-                        maxfev=10000
-                    )
-                    
-                    # Обновляем информацию о выбросах
-                    self.outlier_info['outlier_data'] = outlier_data_residual
-                    self.outlier_info['outlier_count'] = len(outlier_data_residual)
-                    self.clean_data = clean_data_residual
             
             return True
             
         except Exception as e:
             st.error(f"Ошибка при подгонке модели: {str(e)}")
-            return False
+            # Пробуем упрощенную модель
+            try:
+                st.info("Пробуем упрощенную модель...")
+                self.use_advanced_model = False
+                return self.fit_model(data, remove_outliers, outlier_method, contamination)
+            except:
+                return False
     
     def predict_temperature(self, G, sigma_percent, t):
         """Предсказание температуры по известным параметрам"""
         if self.params is None:
             raise ValueError("Модель не обучена!")
         
-        K0, a, b, n, T_sigma_min, T_sigma_max = self.params
         R = 8.314
-        sigma = sigma_percent / 100.0  # Конвертация % в доли
+        sigma = sigma_percent / 100.0
         
         try:
-            Q = a + b * G
+            if self.use_advanced_model:
+                K0, a, b, n, T_sigma_min, T_sigma_max, alpha = self.params
+                # Упрощенный расчет для единичного значения
+                grain_boundary_factor = GrainSizeConverter.calculate_activation_energy_factor(G)
+                Q_effective = (a + b * G) * (1 + alpha * (grain_boundary_factor - 1))
+            else:
+                K0, a, b, n, T_sigma_min, T_sigma_max = self.params
+                Q_effective = a + b * G
+            
             term = -np.log(1 - sigma) / (K0 * (t ** n))
             if term <= 0:
                 return None
             
-            T = -Q / (R * np.log(term))
+            T_kelvin = -Q_effective / (R * np.log(term))
+            T_celsius = T_kelvin - 273.15
             
             # Применяем температурные ограничения
-            T_min_K = T_sigma_min + 273.15
-            T_max_K = T_sigma_max + 273.15
-            
-            if T < T_min_K:
-                return T_min_K - 273.15
-            elif T > T_max_K:
-                return T_max_K - 273.15
+            if T_celsius < T_sigma_min:
+                return T_sigma_min
+            elif T_celsius > T_sigma_max:
+                return T_sigma_max
             else:
-                return T - 273.15
+                return T_celsius
                 
         except:
             return None
@@ -248,14 +464,38 @@ class SigmaPhaseAnalyzer:
             return None
         
         # Предсказанные значения для всех данных
-        G_all = data['Номер_зерна'].values
-        T_all = data['Температура_K'].values
-        t_all = data['Время_ч'].values
-        sigma_exp_all = data['Сигма_фаза_процент'].values
-        sigma_pred_all = sigma_phase_model(self.params, G_all, T_all, t_all) * 100  # В проценты
+        G_all = data['G'].values
+        T_celsius_all = data['T'].values
+        T_kelvin_all = T_celsius_all + 273.15
+        t_all = data['t'].values
+        sigma_exp_all = data['f_exp (%)'].values
+        
+        if self.use_advanced_model:
+            sigma_pred_all = sigma_phase_model_advanced(self.params, G_all, T_kelvin_all, t_all) * 100
+        else:
+            # Простая модель для предсказания
+            def simple_sigma_model(params, G, T_kelvin, t):
+                K0, a, b, n, T_sigma_min, T_sigma_max = params
+                R = 8.314
+                T_min = T_sigma_min + 273.15
+                T_max = T_sigma_max + 273.15
+                
+                T_eff = np.where(T_kelvin < T_min, T_min, T_kelvin)
+                T_eff = np.where(T_eff > T_max, T_max, T_eff)
+                
+                temp_factor = 1 / (1 + np.exp(-0.1 * (T_kelvin - (T_min + 50)))) * 1 / (1 + np.exp(0.1 * (T_kelvin - (T_max - 50))))
+                
+                Q = a + b * G
+                K = K0 * np.exp(-Q / (R * T_eff)) * temp_factor
+                
+                sigma = 1 - np.exp(-K * (t ** n))
+                return sigma
+            
+            sigma_pred_all = simple_sigma_model(self.params, G_all, T_kelvin_all, t_all) * 100
         
         # Определяем, какие точки являются выбросами
         is_outlier = np.zeros(len(data), dtype=bool)
+        outlier_indices = []
         if self.outlier_info and self.outlier_info['outlier_data'] is not None:
             outlier_indices = self.outlier_info['outlier_data'].index
             is_outlier = data.index.isin(outlier_indices)
@@ -300,7 +540,7 @@ class SigmaPhaseAnalyzer:
             row=1, col=1
         )
         
-        fig.update_xaxes(title_text='Экспериментальные значения (%)', row=1, col=1)
+        fig.update_xaxes(title_text='Экспериментальные значения f_exp (%)', row=1, col=1)
         fig.update_yaxes(title_text='Предсказанные значения (%)', row=1, col=1)
         
         # График 2: Распределение остатков
@@ -314,22 +554,22 @@ class SigmaPhaseAnalyzer:
         fig.update_yaxes(title_text='Частота', row=1, col=2)
         
         # График 3: Временные зависимости
-        unique_temps = sorted(data['Температура_K'].unique())
+        unique_temps = sorted(data['T'].unique())
         colors = ['red', 'blue', 'green', 'orange', 'purple']
         
         for i, temp in enumerate(unique_temps):
             if i >= len(colors):
                 break
                 
-            temp_data = data[data['Температура_K'] == temp]
-            temp_outliers = temp_data[temp_data.index.isin(outlier_indices)] if np.any(outlier_mask) else pd.DataFrame()
-            temp_clean = temp_data[~temp_data.index.isin(outlier_indices)] if np.any(outlier_mask) else temp_data
+            temp_data = data[data['T'] == temp]
+            temp_outliers = temp_data[temp_data.index.isin(outlier_indices)] if len(outlier_indices) > 0 else pd.DataFrame()
+            temp_clean = temp_data[~temp_data.index.isin(outlier_indices)] if len(outlier_indices) > 0 else temp_data
             
             # Чистые данные
             if len(temp_clean) > 0:
                 fig.add_trace(
-                    go.Scatter(x=temp_clean['Время_ч'], y=temp_clean['Сигма_фаза_процент'],
-                              mode='markers', name=f'Чистые {temp}K',
+                    go.Scatter(x=temp_clean['t'], y=temp_clean['f_exp (%)'],
+                              mode='markers', name=f'Чистые {temp}°C',
                               marker=dict(color=colors[i], size=8)),
                     row=2, col=1
                 )
@@ -337,36 +577,36 @@ class SigmaPhaseAnalyzer:
             # Выбросы
             if len(temp_outliers) > 0:
                 fig.add_trace(
-                    go.Scatter(x=temp_outliers['Время_ч'], y=temp_outliers['Сигма_фаза_процент'],
-                              mode='markers', name=f'Выбросы {temp}K',
+                    go.Scatter(x=temp_outliers['t'], y=temp_outliers['f_exp (%)'],
+                              mode='markers', name=f'Выбросы {temp}°C',
                               marker=dict(color=colors[i], size=10, symbol='x')),
                     row=2, col=1
                 )
         
-        fig.update_xaxes(title_text='Время (ч)', row=2, col=1)
-        fig.update_yaxes(title_text='Сигма-фаза (%)', row=2, col=1)
+        fig.update_xaxes(title_text='Время t (ч)', row=2, col=1)
+        fig.update_yaxes(title_text='Сигма-фаза f_exp (%)', row=2, col=1)
         
         # График 4: Температурные зависимости
-        unique_times = sorted(data['Время_ч'].unique())[:3]  # Первые 3 времени
+        unique_times = sorted(data['t'].unique())[:3]  # Первые 3 времени
         for i, time_val in enumerate(unique_times):
             if i >= len(colors):
                 break
                 
-            time_data = data[data['Время_ч'] == time_val]
-            time_outliers = time_data[time_data.index.isin(outlier_indices)] if np.any(outlier_mask) else pd.DataFrame()
-            time_clean = time_data[~time_data.index.isin(outlier_indices)] if np.any(outlier_mask) else time_data
+            time_data = data[data['t'] == time_val]
+            time_outliers = time_data[time_data.index.isin(outlier_indices)] if len(outlier_indices) > 0 else pd.DataFrame()
+            time_clean = time_data[~time_data.index.isin(outlier_indices)] if len(outlier_indices) > 0 else time_data
             
             # Чистые данные
             if len(time_clean) > 0:
                 fig.add_trace(
-                    go.Scatter(x=time_clean['Температура_K'] - 273.15, y=time_clean['Сигма_фаза_процент'],
-                              mode='markers', name=f'Чистые {time_val}ч',
+                    go.Scatter(x=time_clean['T'], y=time_clean['f_exp (%)'],
+                              mode='markers', name=f'Чистые {time_val} ч',
                               marker=dict(color=colors[i], size=8)),
                     row=2, col=2
                 )
         
-        fig.update_xaxes(title_text='Температура (°C)', row=2, col=2)
-        fig.update_yaxes(title_text='Сигма-фаза (%)', row=2, col=2)
+        fig.update_xaxes(title_text='Температура T (°C)', row=2, col=2)
+        fig.update_yaxes(title_text='Сигма-фаза f_exp (%)', row=2, col=2)
         
         fig.update_layout(height=800, showlegend=True)
         return fig
@@ -382,7 +622,8 @@ class SigmaPhaseAnalyzer:
             'clean_data': self.clean_data.to_dict() if self.clean_data is not None else None,
             'model_version': self.model_version,
             'creation_date': self.creation_date,
-            'last_modified': self.last_modified
+            'last_modified': self.last_modified,
+            'use_advanced_model': self.use_advanced_model
         }
     
     @classmethod
@@ -402,6 +643,7 @@ class SigmaPhaseAnalyzer:
         analyzer.model_version = data_dict.get('model_version', '1.0')
         analyzer.creation_date = data_dict.get('creation_date')
         analyzer.last_modified = data_dict.get('last_modified')
+        analyzer.use_advanced_model = data_dict.get('use_advanced_model', True)
         
         return analyzer
 
@@ -449,6 +691,7 @@ def main():
                 st.session_state.analyzer = SigmaPhaseAnalyzer.from_dict(project_data['analyzer'])
                 st.session_state.current_data = pd.DataFrame(project_data['current_data'])
                 st.sidebar.success("Проект успешно загружен!")
+                st.rerun()
             except Exception as e:
                 st.sidebar.error(f"Ошибка загрузки проекта: {str(e)}")
     
@@ -460,11 +703,10 @@ def main():
     if remove_outliers:
         outlier_method = st.sidebar.selectbox(
             "Метод обнаружения выбросов",
-            ['iqr', 'isolation_forest', 'residual'],
+            ['iqr', 'isolation_forest'],
             format_func=lambda x: {
                 'iqr': 'Межквартильный размах (IQR)',
-                'isolation_forest': 'Isolation Forest', 
-                'residual': 'По остаткам модели'
+                'isolation_forest': 'Isolation Forest'
             }[x]
         )
         
@@ -476,18 +718,17 @@ def main():
         outlier_method = 'none'
         contamination = 0.1
     
-    # Пример данных с содержанием сигма-фазы в процентах
+    # Пример данных с новыми названиями колонок
     sample_data = pd.DataFrame({
-        'Номер_зерна': [3, 3, 5, 5, 8, 8, 9, 9, 3, 5, 8],
-        'Температура_C': [600, 650, 600, 700, 650, 700, 600, 700, 600, 650, 750],
-        'Температура_K': [873, 923, 873, 973, 923, 973, 873, 973, 873, 923, 1023],
-        'Время_ч': [2000, 4000, 4000, 2000, 6000, 4000, 8000, 6000, 2000, 4000, 4000],
-        'Сигма_фаза_процент': [5.2, 12.5, 8.1, 15.3, 18.7, 25.1, 22.4, 35.2, 12.8, 25.6, 2.1]
+        'G': [3, 3, 5, 5, 8, 8, 9, 9, 3, 5, 8],
+        'T': [600, 650, 600, 700, 650, 700, 600, 700, 600, 650, 750],
+        't': [2000, 4000, 4000, 2000, 6000, 4000, 8000, 6000, 2000, 4000, 4000],
+        'f_exp (%)': [5.2, 12.5, 8.1, 15.3, 18.7, 25.1, 22.4, 35.2, 12.8, 25.6, 2.1]
     })
     
     @st.cache_data
     def convert_df_to_csv(df):
-        return df.to_csv(index=False).encode('utf-8')
+        return df.to_csv(index=False, decimal=',').encode('utf-8')
     
     sample_csv = convert_df_to_csv(sample_data)
     
@@ -498,26 +739,95 @@ def main():
         mime="text/csv"
     )
     
+    # Загрузка данных
+    st.sidebar.header("📊 Загрузка данных")
+    
     uploaded_file = st.sidebar.file_uploader(
-        "Загрузите CSV файл с экспериментальными данными",
-        type=['csv']
+        "Загрузите файл с экспериментальными данными",
+        type=['csv', 'xlsx', 'xls'],
+        help="Поддерживаемые форматы: CSV, Excel (.xlsx, .xls)"
     )
     
+    # Обработка загруженного файла
     if uploaded_file is not None:
-        st.session_state.current_data = pd.read_csv(uploaded_file)
-    elif st.session_state.current_data is None:
-        st.info("👈 Пожалуйста, загрузите CSV файл с данными или используйте пример данных")
+        try:
+            if uploaded_file.name.endswith('.csv'):
+                # Для CSV с запятой как разделителем десятичных
+                data = pd.read_csv(uploaded_file, decimal=',')
+            else:
+                # Для Excel файлов
+                if uploaded_file.name.endswith('.xlsx'):
+                    data = pd.read_excel(uploaded_file, engine='openpyxl')
+                else:  # .xls
+                    data = pd.read_excel(uploaded_file, engine='xlrd')
+            
+            # Проверяем необходимые колонки
+            required_columns = ['G', 'T', 't', 'f_exp (%)']
+            if all(col in data.columns for col in required_columns):
+                # Округляем значения до тысячных
+                data['f_exp (%)'] = data['f_exp (%)'].round(3)
+                st.session_state.current_data = data
+                st.sidebar.success("Данные успешно загружены!")
+            else:
+                st.sidebar.error("В файле отсутствуют необходимые колонки")
+                st.sidebar.info("Необходимые колонки: G, T, t, f_exp (%)")
+                
+        except Exception as e:
+            st.sidebar.error(f"Ошибка чтения файла: {str(e)}")
+    
+    # Если данных нет, используем пример
+    if st.session_state.current_data is None:
+        st.info("👈 Пожалуйста, загрузите файл с данными или используйте пример данных")
         st.session_state.current_data = sample_data
     
     # Показ загруженных данных
     st.header("📊 Экспериментальные данные")
     
+    # Детальная информация о размерах зерен из ГОСТ
+    st.subheader("📐 Данные о размерах зерен по ГОСТ 5639-82")
+    
+    if st.checkbox("Показать полную таблицу ГОСТ"):
+        gost_table = GrainSizeConverter.get_grain_info_table()
+        st.dataframe(gost_table, use_container_width=True)
+    
+    # Информация о зернах в данных
+    if st.session_state.current_data is not None:
+        unique_grain_numbers = sorted(st.session_state.current_data['G'].unique())
+        
+        st.write("**Характеристики зерен в экспериментальных данных:**")
+        cols = st.columns(min(5, len(unique_grain_numbers)))
+        
+        for i, grain_num in enumerate(unique_grain_numbers):
+            with cols[i % 5]:
+                area = GrainSizeConverter.grain_number_to_area(grain_num)
+                diameter = GrainSizeConverter.grain_number_to_diameter(grain_num)
+                boundary_density = GrainSizeConverter.calculate_grain_boundary_density(grain_num)
+                activation_factor = GrainSizeConverter.calculate_activation_energy_factor(grain_num)
+                
+                st.metric(
+                    f"Номер {grain_num}",
+                    f"{diameter*1000:.1f} мкм",
+                    f"Плотность: {boundary_density:.0f} мм²/мм³"
+                )
+                st.caption(f"Площадь: {area:.4f} мм²")
+                st.caption(f"Коэф. активации: {activation_factor:.3f}")
+    
     # Редактирование данных
+    st.write("**Редактирование данных (округление до тысячных):**")
     edited_data = st.data_editor(
         st.session_state.current_data,
         num_rows="dynamic",
-        use_container_width=True
+        use_container_width=True,
+        column_config={
+            "f_exp (%)": st.column_config.NumberColumn(
+                format="%.3f"
+            )
+        }
     )
+    
+    # Округляем значения после редактирования
+    if 'f_exp (%)' in edited_data.columns:
+        edited_data['f_exp (%)'] = edited_data['f_exp (%)'].round(3)
     
     if not edited_data.equals(st.session_state.current_data):
         st.session_state.current_data = edited_data
@@ -567,20 +877,38 @@ def main():
         st.subheader("📈 Параметры модели")
         
         if analyzer.params is not None:
-            K0, a, b, n, T_sigma_min, T_sigma_max = analyzer.params
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("K₀", f"{K0:.2e}")
-                st.metric("a", f"{a:.2f}")
-            with col2:
-                st.metric("b", f"{b:.2f}")
-                st.metric("n", f"{n:.3f}")
-            with col3:
-                st.metric("T_min (°C)", f"{T_sigma_min:.1f}")
-            with col4:
-                st.metric("T_max (°C)", f"{T_sigma_max:.1f}")
+            if analyzer.use_advanced_model:
+                K0, a, b, n, T_sigma_min, T_sigma_max, alpha = analyzer.params
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("K₀", f"{K0:.2e}")
+                    st.metric("a", f"{a:.2f}")
+                with col2:
+                    st.metric("b", f"{b:.2f}")
+                    st.metric("n", f"{n:.3f}")
+                with col3:
+                    st.metric("T_min (°C)", f"{T_sigma_min:.1f}")
+                    st.metric("T_max (°C)", f"{T_sigma_max:.1f}")
+                with col4:
+                    st.metric("α", f"{alpha:.3f}")
+                    st.metric("Модель", "Расширенная")
+                    
+            else:
+                K0, a, b, n, T_sigma_min, T_sigma_max = analyzer.params
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("K₀", f"{K0:.2e}")
+                    st.metric("a", f"{a:.2f}")
+                with col2:
+                    st.metric("b", f"{b:.2f}")
+                    st.metric("n", f"{n:.3f}")
+                with col3:
+                    st.metric("T_min (°C)", f"{T_sigma_min:.1f}")
+                    st.metric("T_max (°C)", f"{T_sigma_max:.1f}")
+                with col4:
+                    st.metric("Модель", "Базовая")
             
             # Метрики качества
             st.subheader("📊 Метрики качества модели")
@@ -602,15 +930,16 @@ def main():
             
             with col1:
                 G_input = st.number_input("Номер зерна (G)", 
-                                        min_value=1.0, max_value=12.0, 
+                                        min_value=-3.0, max_value=14.0, 
                                         value=5.0, step=0.1)
             with col2:
-                sigma_input = st.number_input("Содержание сигма-фазы (%)", 
+                sigma_input = st.number_input("Содержание сигма-фазы f_exp (%)", 
                                             min_value=0.0, max_value=50.0,
                                             value=10.0, step=0.1,
+                                            format="%.3f",
                                             help="От 0% до 50%")
             with col3:
-                t_input = st.number_input("Время эксплуатации (ч)", 
+                t_input = st.number_input("Время эксплуатации t (ч)", 
                                         min_value=100, max_value=100000,
                                         value=4000, step=100)
             
@@ -619,11 +948,18 @@ def main():
                     T_celsius = analyzer.predict_temperature(G_input, sigma_input, t_input)
                     
                     if T_celsius is not None:
+                        if analyzer.use_advanced_model:
+                            T_sigma_min = analyzer.params[4]
+                            T_sigma_max = analyzer.params[5]
+                        else:
+                            T_sigma_min = analyzer.params[4]
+                            T_sigma_max = analyzer.params[5]
+                        
                         st.success(f"""
                         ### Результат расчета:
                         - **Температура эксплуатации:** {T_celsius:.1f}°C
                         - При номере зерна: {G_input}
-                        - Содержании сигма-фазы: {sigma_input:.1f}%
+                        - Содержании сигма-фазы: {sigma_input:.3f}%
                         - Наработке: {t_input} ч
                         - **Температурный диапазон модели:** {T_sigma_min:.1f}°C - {T_sigma_max:.1f}°C
                         """)

@@ -418,6 +418,46 @@ class SigmaPhaseAnalyzer:
             # При численных ошибках возвращаем граничное значение
             st.warning(f"⚠️ При расчете для t={t} ч возникла численная ошибка. Используется минимальная температура.")
             return T_sigma_min
+    
+    def calculate_validation_metrics(self, data):
+        """Расчет метрик валидации на данных"""
+        if self.params is None:
+            return None
+        
+        G = data['G'].values
+        T_celsius = data['T'].values
+        T_kelvin = T_celsius + 273.15
+        t = data['t'].values
+        sigma_exp = data['f_exp (%)'].values
+        
+        # Предсказание модели
+        sigma_pred = self.sigma_phase_model_advanced(self.params, G, T_kelvin, t) * 100
+        
+        # Расчет отклонений
+        residuals = sigma_pred - sigma_exp
+        relative_errors = (residuals / sigma_exp) * 100
+        
+        # Статистика ошибок
+        mae = np.mean(np.abs(residuals))
+        mse = np.mean(residuals**2)
+        rmse = np.sqrt(mse)
+        mape = np.mean(np.abs(relative_errors))
+        
+        validation_results = {
+            'data': data.copy(),
+            'predictions': sigma_pred,
+            'residuals': residuals,
+            'relative_errors': relative_errors,
+            'metrics': {
+                'MAE': mae,
+                'MSE': mse,
+                'RMSE': rmse,
+                'MAPE': mape,
+                'R2': r2_score(sigma_exp, sigma_pred)
+            }
+        }
+        
+        return validation_results
 
 def read_uploaded_file(uploaded_file):
     """Чтение загруженного файла с обработкой ошибок"""
@@ -464,6 +504,11 @@ def main():
         st.session_state.analyzer = None
     if 'current_data' not in st.session_state:
         st.session_state.current_data = None
+    if 'validation_results' not in st.session_state:
+        st.session_state.validation_results = None
+    
+    # Создание вкладок
+    tab1, tab2, tab3 = st.tabs(["📊 Данные и модель", "🧮 Калькулятор", "📈 Валидация модели"])
     
     # Боковая панель
     st.sidebar.header("📁 Управление проектом")
@@ -529,113 +574,123 @@ def main():
     
     # Если данных нет, используем пример
     if st.session_state.current_data is None:
-        st.info("👈 Пожалуйста, загрузите файл с данными или используйте пример данных")
         st.session_state.current_data = sample_data
-    
-    # Показ загруженных данных
-    st.header("📊 Экспериментальные данные")
-    
-    # Показываем информацию о колонках
-    if st.session_state.current_data is not None:
-        st.info(f"**Структура данных:** {len(st.session_state.current_data)} строк × {len(st.session_state.current_data.columns)} колонок")
-        st.write("**Загруженные колонки:**", list(st.session_state.current_data.columns))
-    
-    # Редактирование данных
-    if st.session_state.current_data is not None:
-        edited_data = st.data_editor(
-            st.session_state.current_data,
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "f_exp (%)": st.column_config.NumberColumn(format="%.3f"),
-                "G": st.column_config.NumberColumn(format="%d"),
-                "T": st.column_config.NumberColumn(format="%.1f"),
-                "t": st.column_config.NumberColumn(format="%d")
-            }
-        )
+
+    # ВКЛАДКА 1: Данные и модель
+    with tab1:
+        st.header("📊 Экспериментальные данные")
         
-        # Округляем значения после редактирования
-        if 'f_exp (%)' in edited_data.columns:
-            edited_data['f_exp (%)'] = edited_data['f_exp (%)'].round(3)
+        # Показываем информацию о колонках
+        if st.session_state.current_data is not None:
+            st.info(f"**Структура данных:** {len(st.session_state.current_data)} строк × {len(st.session_state.current_data.columns)} колонок")
+            st.write("**Загруженные колонки:**", list(st.session_state.current_data.columns))
         
-        if not edited_data.equals(st.session_state.current_data):
-            st.session_state.current_data = edited_data
-            st.session_state.analyzer = None
-            st.rerun()
-    
-    # Анализ данных
-    st.header("🔍 Анализ данных")
-    
-    if st.session_state.current_data is not None and 'G' in st.session_state.current_data.columns:
-        # Информация о зернах в данных
-        unique_grain_numbers = sorted(st.session_state.current_data['G'].unique())
-        
-        st.subheader("📐 Характеристики зерен в данных")
-        cols = st.columns(min(5, len(unique_grain_numbers)))
-        
-        for i, grain_num in enumerate(unique_grain_numbers):
-            with cols[i % 5]:
-                diameter = GrainSizeConverter.grain_number_to_diameter(grain_num)
-                boundary_density = GrainSizeConverter.calculate_grain_boundary_density(grain_num)
-                activation_factor = GrainSizeConverter.calculate_activation_energy_factor(grain_num)
-                
-                st.metric(
-                    f"G = {grain_num}",
-                    f"{diameter*1000:.1f} мкм",
-                    f"Плотность: {boundary_density:.0f} мм²/мм³"
-                )
-                st.caption(f"Коэф. активации: {activation_factor:.3f}")
-    
-    # Кнопка подбора параметров модели
-    if st.button("🎯 Подобрать параметры модели", use_container_width=True):
-        if st.session_state.current_data is not None and all(col in st.session_state.current_data.columns for col in ['G', 'T', 't', 'f_exp (%)']):
-            analyzer = SigmaPhaseAnalyzer()
+        # Редактирование данных
+        if st.session_state.current_data is not None:
+            edited_data = st.data_editor(
+                st.session_state.current_data,
+                num_rows="dynamic",
+                use_container_width=True,
+                column_config={
+                    "f_exp (%)": st.column_config.NumberColumn(format="%.3f"),
+                    "G": st.column_config.NumberColumn(format="%d"),
+                    "T": st.column_config.NumberColumn(format="%.1f"),
+                    "t": st.column_config.NumberColumn(format="%d")
+                }
+            )
             
-            with st.spinner("Идет подбор параметров модели..."):
-                success = analyzer.fit_model(
-                    st.session_state.current_data, 
-                    remove_outliers=remove_outliers
-                )
+            # Округляем значения после редактирования
+            if 'f_exp (%)' in edited_data.columns:
+                edited_data['f_exp (%)'] = edited_data['f_exp (%)'].round(3)
             
-            if success:
-                st.session_state.analyzer = analyzer
-                st.success("✅ Модель успешно обучена!")
+            if not edited_data.equals(st.session_state.current_data):
+                st.session_state.current_data = edited_data
+                st.session_state.analyzer = None
+                st.session_state.validation_results = None
                 st.rerun()
-        else:
-            st.error("❌ Для подбора модели необходимы колонки: G, T, t, f_exp (%)")
-    
-    # Показ результатов модели
-    if st.session_state.analyzer is not None:
-        analyzer = st.session_state.analyzer
         
-        # Параметры модели
-        st.subheader("📈 Параметры модели")
+        # Анализ данных
+        st.header("🔍 Анализ данных")
         
-        if analyzer.params is not None:
-            K0, a, b, n, T_sigma_min, T_sigma_max, alpha = analyzer.params
+        if st.session_state.current_data is not None and 'G' in st.session_state.current_data.columns:
+            # Информация о зернах в данных
+            unique_grain_numbers = sorted(st.session_state.current_data['G'].unique())
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("K₀", f"{K0:.2e}")
-                st.metric("a", f"{a:.2f}")
-            with col2:
-                st.metric("b", f"{b:.2f}")
-                st.metric("n", f"{n:.3f}")
-            with col3:
-                st.metric("α", f"{alpha:.3f}")
+            st.subheader("📐 Характеристики зерен в данных")
+            cols = st.columns(min(5, len(unique_grain_numbers)))
             
-            st.metric("Температурный диапазон", f"{T_sigma_min:.1f}°C - {T_sigma_max:.1f}°C")
+            for i, grain_num in enumerate(unique_grain_numbers):
+                with cols[i % 5]:
+                    diameter = GrainSizeConverter.grain_number_to_diameter(grain_num)
+                    boundary_density = GrainSizeConverter.calculate_grain_boundary_density(grain_num)
+                    activation_factor = GrainSizeConverter.calculate_activation_energy_factor(grain_num)
+                    
+                    st.metric(
+                        f"G = {grain_num}",
+                        f"{diameter*1000:.1f} мкм",
+                        f"Плотность: {boundary_density:.0f} мм²/мм³"
+                    )
+                    st.caption(f"Коэф. активации: {activation_factor:.3f}")
+        
+        # Кнопка подбора параметров модели
+        if st.button("🎯 Подобрать параметры модели", use_container_width=True):
+            if st.session_state.current_data is not None and all(col in st.session_state.current_data.columns for col in ['G', 'T', 't', 'f_exp (%)']):
+                analyzer = SigmaPhaseAnalyzer()
+                
+                with st.spinner("Идет подбор параметров модели..."):
+                    success = analyzer.fit_model(
+                        st.session_state.current_data, 
+                        remove_outliers=remove_outliers
+                    )
+                
+                if success:
+                    st.session_state.analyzer = analyzer
+                    
+                    # Автоматически рассчитываем валидацию
+                    validation_results = analyzer.calculate_validation_metrics(st.session_state.current_data)
+                    st.session_state.validation_results = validation_results
+                    
+                    st.success("✅ Модель успешно обучена!")
+                    st.rerun()
+            else:
+                st.error("❌ Для подбора модели необходимы колонки: G, T, t, f_exp (%)")
+        
+        # Показ результатов модели
+        if st.session_state.analyzer is not None:
+            analyzer = st.session_state.analyzer
             
-            # Метрики качества
-            st.subheader("📊 Метрики качества модели")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("R²", f"{analyzer.R2:.4f}")
-            with col2:
-                st.metric("RMSE", f"{analyzer.rmse:.2f}%")
+            # Параметры модели
+            st.subheader("📈 Параметры модели")
             
-            # Калькулятор температуры
-            st.header("🧮 Калькулятор температуры эксплуатации")
+            if analyzer.params is not None:
+                K0, a, b, n, T_sigma_min, T_sigma_max, alpha = analyzer.params
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("K₀", f"{K0:.2e}")
+                    st.metric("a", f"{a:.2f}")
+                with col2:
+                    st.metric("b", f"{b:.2f}")
+                    st.metric("n", f"{n:.3f}")
+                with col3:
+                    st.metric("α", f"{alpha:.3f}")
+                
+                st.metric("Температурный диапазон", f"{T_sigma_min:.1f}°C - {T_sigma_max:.1f}°C")
+                
+                # Метрики качества
+                st.subheader("📊 Метрики качества модели")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("R²", f"{analyzer.R2:.4f}")
+                with col2:
+                    st.metric("RMSE", f"{analyzer.rmse:.2f}%")
+
+    # ВКЛАДКА 2: Калькулятор
+    with tab2:
+        st.header("🧮 Калькулятор температуры эксплуатации")
+        
+        if st.session_state.analyzer is not None:
+            analyzer = st.session_state.analyzer
             
             col1, col2, col3 = st.columns(3)
             
@@ -650,8 +705,8 @@ def main():
                                             format="%.3f")
             with col3:
                 t_input = st.number_input("Время эксплуатации t (ч)", 
-                                        min_value=100, max_value=500000,  # ИЗМЕНЕНО: 500000 часов
-                                        value=4000, step=1000)  # Увеличили шаг для удобства
+                                        min_value=100, max_value=500000,
+                                        value=4000, step=1000)
 
             # Информация о диапазоне
             if t_input > 100000:
@@ -688,6 +743,165 @@ def main():
                         
                 except Exception as e:
                     st.error(f"Ошибка при расчете: {str(e)}")
+        else:
+            st.info("👆 Сначала обучите модель на вкладке 'Данные и модель'")
+
+    # ВКЛАДКА 3: Валидация модели
+    with tab3:
+        st.header("📈 Валидация модели")
+        
+        if st.session_state.analyzer is not None and st.session_state.validation_results is not None:
+            analyzer = st.session_state.analyzer
+            validation = st.session_state.validation_results
+            
+            # Метрики валидации
+            st.subheader("📊 Метрики качества модели")
+            metrics = validation['metrics']
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("R²", f"{metrics['R2']:.4f}")
+                st.metric("MAE", f"{metrics['MAE']:.3f}%")
+            with col2:
+                st.metric("RMSE", f"{metrics['RMSE']:.3f}%")
+                st.metric("MSE", f"{metrics['MSE']:.3f}%²")
+            with col3:
+                st.metric("MAPE", f"{metrics['MAPE']:.2f}%")
+            with col4:
+                st.metric("Количество точек", f"{len(validation['data'])}")
+            
+            # Таблица сравнения
+            st.subheader("📋 Сравнение экспериментальных и расчетных значений")
+            
+            comparison_df = validation['data'].copy()
+            comparison_df['f_pred (%)'] = validation['predictions']
+            comparison_df['Абс. ошибка (%)'] = validation['residuals']
+            comparison_df['Отн. ошибка (%)'] = validation['relative_errors']
+            comparison_df['f_pred (%)'] = comparison_df['f_pred (%)'].round(3)
+            comparison_df['Абс. ошибка (%)'] = comparison_df['Абс. ошибка (%)'].round(3)
+            comparison_df['Отн. ошибка (%)'] = comparison_df['Отн. ошибка (%)'].round(2)
+            
+            st.dataframe(comparison_df, use_container_width=True)
+            
+            # Графики валидации
+            st.subheader("📈 Графики валидации")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # График предсказания vs эксперимент
+                fig1 = go.Figure()
+                
+                fig1.add_trace(go.Scatter(
+                    x=validation['data']['f_exp (%)'],
+                    y=validation['predictions'],
+                    mode='markers',
+                    name='Точки данных',
+                    marker=dict(size=8, color='blue', opacity=0.6)
+                ))
+                
+                # Линия идеального предсказания
+                max_val = max(validation['data']['f_exp (%)'].max(), validation['predictions'].max())
+                fig1.add_trace(go.Scatter(
+                    x=[0, max_val],
+                    y=[0, max_val],
+                    mode='lines',
+                    name='Идеальное предсказание',
+                    line=dict(color='red', dash='dash')
+                ))
+                
+                fig1.update_layout(
+                    title='Предсказание vs Эксперимент',
+                    xaxis_title='Экспериментальное значение f_exp (%)',
+                    yaxis_title='Расчетное значение f_pred (%)',
+                    showlegend=True
+                )
+                
+                st.plotly_chart(fig1, use_container_width=True)
+            
+            with col2:
+                # График остатков
+                fig2 = go.Figure()
+                
+                fig2.add_trace(go.Scatter(
+                    x=validation['predictions'],
+                    y=validation['residuals'],
+                    mode='markers',
+                    name='Остатки',
+                    marker=dict(size=8, color='green', opacity=0.6)
+                ))
+                
+                # Нулевая линия
+                fig2.add_trace(go.Scatter(
+                    x=[validation['predictions'].min(), validation['predictions'].max()],
+                    y=[0, 0],
+                    mode='lines',
+                    name='Нулевая линия',
+                    line=dict(color='red', dash='dash')
+                ))
+                
+                fig2.update_layout(
+                    title='Остатки модели',
+                    xaxis_title='Расчетное значение f_pred (%)',
+                    yaxis_title='Остаток (f_pred - f_exp) (%)',
+                    showlegend=True
+                )
+                
+                st.plotly_chart(fig2, use_container_width=True)
+            
+            # Гистограмма ошибок
+            st.subheader("📊 Распределение ошибок")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                fig3 = go.Figure()
+                fig3.add_trace(go.Histogram(
+                    x=validation['residuals'],
+                    nbinsx=20,
+                    name='Абсолютные ошибки',
+                    marker_color='orange'
+                ))
+                fig3.update_layout(
+                    title='Распределение абсолютных ошибок',
+                    xaxis_title='Ошибка (%)',
+                    yaxis_title='Количество'
+                )
+                st.plotly_chart(fig3, use_container_width=True)
+            
+            with col2:
+                fig4 = go.Figure()
+                fig4.add_trace(go.Histogram(
+                    x=validation['relative_errors'],
+                    nbinsx=20,
+                    name='Относительные ошибки',
+                    marker_color='purple'
+                ))
+                fig4.update_layout(
+                    title='Распределение относительных ошибок',
+                    xaxis_title='Относительная ошибка (%)',
+                    yaxis_title='Количество'
+                )
+                st.plotly_chart(fig4, use_container_width=True)
+            
+            # Статистика по ошибкам
+            st.subheader("📈 Статистика ошибок")
+            
+            abs_errors = np.abs(validation['residuals'])
+            rel_errors = np.abs(validation['relative_errors'])
+            
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Макс. абс. ошибка", f"{abs_errors.max():.3f}%")
+            with col2:
+                st.metric("Макс. отн. ошибка", f"{rel_errors.max():.2f}%")
+            with col3:
+                st.metric("Средняя абс. ошибка", f"{abs_errors.mean():.3f}%")
+            with col4:
+                st.metric("Средняя отн. ошибка", f"{rel_errors.mean():.2f}%")
+                
+        else:
+            st.info("👆 Сначала обучите модель на вкладке 'Данные и модель'")
 
 if __name__ == "__main__":
     main()

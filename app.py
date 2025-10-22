@@ -29,6 +29,76 @@ st.markdown("""
 ### Определение температурной зависимости по содержанию сигма-фазы, времени эксплуатации и номеру зерна
 """)
 
+class ComplexDataParser:
+    """Класс для парсинга сложных Excel файлов с данными сигма-фазы"""
+    
+    @staticmethod
+    def parse_complex_excel(file_path):
+        """Парсинг сложного Excel файла с экспериментальными данными"""
+        try:
+            # Читаем файл
+            df = pd.read_excel(file_path, sheet_name=0, header=None)
+            
+            results = []
+            
+            # Проходим по строкам с данными (начиная со строки 2, так как строка 1 - заголовок)
+            for i in range(2, len(df)):
+                row = df.iloc[i]
+                
+                # Проверяем, есть ли основные данные в первых 4 колонках
+                if pd.notna(row[0]) and pd.notna(row[1]) and pd.notna(row[2]) and pd.notna(row[3]):
+                    try:
+                        G = float(row[0])
+                        T = float(row[1])
+                        t = float(row[2])
+                        f_exp = float(row[3])
+                        
+                        # Проверяем корректность данных
+                        if (G in [3, 5, 8, 9, 10] and 
+                            T in [600, 650, 700] and 
+                            t in [2000, 4000, 6000, 8000] and
+                            0 <= f_exp <= 10):
+                            
+                            results.append({
+                                'G': G,
+                                'T': T, 
+                                't': t,
+                                'f_exp (%)': f_exp
+                            })
+                    except (ValueError, TypeError):
+                        continue
+            
+            return pd.DataFrame(results)
+            
+        except Exception as e:
+            raise Exception(f"Ошибка парсинга файла: {e}")
+
+    @staticmethod
+    def extract_all_data(uploaded_file):
+        """Извлечение всех данных из загруженного файла"""
+        try:
+            # Создаем временный файл
+            with open("temp_file.xlsx", "wb") as f:
+                f.write(uploaded_file.getvalue())
+            
+            # Парсим данные
+            data = ComplexDataParser.parse_complex_excel("temp_file.xlsx")
+            
+            # Удаляем временный файл
+            import os
+            if os.path.exists("temp_file.xlsx"):
+                os.remove("temp_file.xlsx")
+                
+            # ВОЗВРАЩАЕМ ТОЛЬКО ЕСЛИ ЕСТЬ ДАННЫЕ
+            if data is not None and len(data) > 0:
+                return data
+            else:
+                return None
+                
+        except Exception as e:
+            st.error(f"❌ Ошибка извлечения данных: {e}")
+            return None
+
 class DataValidator:
     """Класс для валидации и нормализации данных"""
     
@@ -101,21 +171,6 @@ class DataValidator:
         if (t_values > max_time).any():
             st.warning(f"⚠️ Обнаружены значения времени эксплуатации свыше {max_time} часов")
         return True
-class DataValidator:
-    # ... все методы ...
-    
-    @staticmethod
-    def validate_time_range(t_values):
-        """Проверка диапазона времени эксплуатации"""
-        max_time = 500000
-        if (t_values > max_time).any():
-            st.warning(f"⚠️ Обнаружены значения времени эксплуатации свыше {max_time} часов")
-        return True
-
-# === DataValidator ЗАКОНЧИЛСЯ ЗДЕСЬ ===
-
-class GrainSizeConverter:  # ← Начало следующего класса
-    """Класс для преобразования номера зерна в физические параметры по ГОСТ 5639-82"""
 
 class GrainSizeConverter:
     """Класс для преобразования номера зерна в физические параметры по ГОСТ 5639-82"""
@@ -405,7 +460,6 @@ K_avrami = {K0:.3e} × exp(-{Q/1000:.1f} кДж/моль / (R × T)) × [1 + {al
 f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)]
             """
       
-     
         self.final_formula += "\n**R = 8.314 Дж/(моль·К) - универсальная газовая постоянная**\n**T - температура в Кельвинах (T[°C] + 273.15)**"
     
     def predict_temperature(self, G, sigma_percent, t):
@@ -524,6 +578,7 @@ f_power = {w:.3f} × exp({beta:.0f} / (R × T)) × t^0.5 × [1 + 0.05 × (G - 8)
 def read_uploaded_file(uploaded_file):
     """Чтение загруженного файла"""
     try:
+        # Сначала пробуем стандартное чтение
         if uploaded_file.name.endswith('.csv'):
             try:
                 data = pd.read_csv(uploaded_file, decimal=',', encoding='utf-8')
@@ -534,18 +589,36 @@ def read_uploaded_file(uploaded_file):
                     data = pd.read_csv(uploaded_file, decimal='.', encoding='utf-8')
         else:
             try:
+                # Пробуем прочитать как простой файл
                 if uploaded_file.name.endswith('.xlsx'):
                     data = pd.read_excel(uploaded_file, engine='openpyxl')
                 else:
                     data = pd.read_excel(uploaded_file, engine='xlrd')
+                
+                # СНАЧАЛА проверяем что данные загрузились
+                if data is not None and len(data) > 0:
+                    # ТЕПЕРЬ нормализуем названия колонок
+                    data_normalized = DataValidator.normalize_column_names(data)
+                    # Проверяем есть ли нужные колонки после нормализации
+                    if not all(col in data_normalized.columns for col in ['G', 'T', 't', 'f_exp (%)']):
+                        # Если нет нужных колонок, пробуем парсить как сложный файл
+                        st.warning("⚠️ Обнаружен сложный формат данных. Применяем специальный парсер...")
+                        data = ComplexDataParser.extract_all_data(uploaded_file)
+                    else:
+                        data = data_normalized
+                else:
+                    # Если данные пустые, пробуем сложный парсер
+                    st.warning("⚠️ Данные не загрузились. Пробуем специальный парсер...")
+                    data = ComplexDataParser.extract_all_data(uploaded_file)
+                    
             except Exception as e:
-                st.error(f"❌ Ошибка чтения Excel файла: {str(e)}")
-                return None
+                st.warning(f"⚠️ Стандартное чтение не удалось: {e}. Пробуем специальный парсер...")
+                data = ComplexDataParser.extract_all_data(uploaded_file)
         
         return data
         
     except Exception as e:
-        st.error(f"❌ Ошибка чтения файла: {str(e)}")
+        st.error(f"❌ Ошибка чтения файла: {e}")
         return None
 
 def main():
@@ -596,16 +669,40 @@ def main():
         type=['csv', 'xlsx', 'xls']
     )
     
+    # Кнопка для принудительного парсинга сложных файлов
+    if uploaded_file is not None and uploaded_file.name.endswith(('.xlsx', '.xls')):
+        if st.sidebar.button("🔧 Принудительный парсинг сложного файла"):
+            with st.spinner("Парсим сложную структуру файла..."):
+                data = ComplexDataParser.extract_all_data(uploaded_file)
+                if data is not None and len(data) > 0:
+                    data = DataValidator.normalize_column_names(data)
+                    is_valid, message = DataValidator.validate_data(data)
+                    if is_valid:
+                        data['f_exp (%)'] = data['f_exp (%)'].round(3)
+                        st.session_state.current_data = data
+                        st.sidebar.success(f"✅ Извлечено {len(data)} записей!")
+                        st.rerun()
+                else:
+                    st.sidebar.error("❌ Не удалось извлечь данные из файла")
+
+    # ОСНОВНАЯ ЗАГРУЗКА
     if uploaded_file is not None:
         data = read_uploaded_file(uploaded_file)
-        if data is not None:
-            data = DataValidator.normalize_column_names(data)
+        if data is not None and len(data) > 0:
+            # Нормализуем названия колонок ЕСЛИ еще не нормализованы
+            if 'G' not in data.columns or 'T' not in data.columns or 't' not in data.columns or 'f_exp (%)' not in data.columns:
+                data = DataValidator.normalize_column_names(data)
+            
             is_valid, message = DataValidator.validate_data(data)
             if is_valid:
                 data['f_exp (%)'] = data['f_exp (%)'].round(3)
                 st.session_state.current_data = data
                 st.sidebar.success("✅ Данные успешно загружены!")
-    
+            else:
+                st.sidebar.error(f"❌ Ошибка валидации: {message}")
+        else:
+            st.sidebar.error("❌ Не удалось загрузить данные из файла")
+
     if st.session_state.current_data is None:
         st.session_state.current_data = sample_data
 
@@ -674,7 +771,6 @@ def main():
         # Подбор модели
         st.header("🎯 Подбор параметров модели")
         
-        # Исправленная строка - убрал лишние фигурные скобки
         model_names = {
             'avrami_saturation': 'Аврами с насыщением', 
             'power_law': 'Степенная', 

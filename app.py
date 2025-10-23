@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 import seaborn as sns
+import io
 
 # Данные из таблицы ГОСТ 5639-82
 grain_data = {
@@ -45,15 +46,125 @@ with st.expander("Данные ГОСТ 5639-82 о размерах зерен")
     """)
 
 # Загрузка данных
-uploaded_file = st.file_uploader("Загрузите CSV с колонками: G, T, t, d", type=['csv'])
+st.subheader("Загрузка экспериментальных данных")
 
-if uploaded_file:
-    df = pd.read_csv(uploaded_file)
-    st.success("Данные загружены!")
-    st.dataframe(df.head())
+# Создаем шаблон Excel файла для загрузки
+def create_template():
+    template_data = {
+        'G': [7, 7, 7, 7, 5, 5, 5, 5, 3, 3, 3, 3],
+        'T': [600, 600, 600, 600, 650, 650, 650, 650, 700, 700, 700, 700],
+        't': [2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000],
+        'd': [2.1, 3.0, 3.6, 4.1, 3.5, 4.8, 5.8, 6.5, 5.2, 7.1, 8.5, 9.6]
+    }
+    df_template = pd.DataFrame(template_data)
+    return df_template
+
+# Кнопка для скачивания шаблона
+template_df = create_template()
+
+# Конвертируем DataFrame в Excel файл в памяти
+excel_buffer = io.BytesIO()
+with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
+    template_df.to_excel(writer, sheet_name='Шаблон_данных', index=False)
+    # Добавляем лист с описанием
+    description_df = pd.DataFrame({
+        'Колонка': ['G', 'T', 't', 'd'],
+        'Описание': [
+            'Номер зерна по ГОСТ 5639-82',
+            'Температура в °C', 
+            'Время выдержки в часах',
+            'Эквивалентный диаметр σ-фазы в мкм'
+        ],
+        'Пример': ['7, 5, 3', '600, 650, 700', '2000, 4000, 6000, 8000', '2.1, 3.0, 4.1']
+    })
+    description_df.to_excel(writer, sheet_name='Описание_колонок', index=False)
+
+excel_buffer.seek(0)
+
+st.download_button(
+    label="📥 Скачать шаблон Excel файла",
+    data=excel_buffer,
+    file_name="шаблон_данных_сигма_фаза.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    help="Скачайте шаблон для заполнения вашими экспериментальными данными"
+)
+
+# Загрузка файла
+uploaded_file = st.file_uploader(
+    "Загрузите файл с экспериментальными данными", 
+    type=['csv', 'xlsx', 'xls'],
+    help="Поддерживаемые форматы: CSV, Excel (.xlsx, .xls)"
+)
+
+df = None
+
+if uploaded_file is not None:
+    try:
+        # Определяем тип файла и загружаем соответствующим образом
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+            st.success("CSV файл успешно загружен!")
+        elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+            # Для Excel файлов показываем доступные листы
+            excel_file = pd.ExcelFile(uploaded_file)
+            sheet_names = excel_file.sheet_names
+            
+            if len(sheet_names) == 1:
+                df = pd.read_excel(uploaded_file, sheet_name=sheet_names[0])
+                st.success(f"Excel файл загружен с листа: {sheet_names[0]}")
+            else:
+                selected_sheet = st.selectbox(
+                    "Выберите лист с данными:",
+                    options=sheet_names
+                )
+                df = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
+                st.success(f"Данные загружены с листа: {selected_sheet}")
+        
+        # Проверяем необходимые колонки
+        required_columns = ['G', 'T', 't', 'd']
+        if all(col in df.columns for col in required_columns):
+            st.success("Все необходимые колонки присутствуют!")
+            
+            # Показываем предпросмотр данных
+            st.subheader("Предпросмотр данных")
+            st.dataframe(df.head())
+            
+            # Статистика по данным
+            st.subheader("Статистика данных")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Количество записей", len(df))
+            with col2:
+                st.metric("Уникальные номера зерен", df['G'].nunique())
+            with col3:
+                st.metric("Температуры исследования", f"{df['T'].min()} - {df['T'].max()}°C")
+            with col4:
+                st.metric("Время выдержки", f"{df['t'].min()} - {df['t'].max()} ч")
+            
+            # Сохраняем данные в session_state
+            st.session_state['experimental_data'] = df
+            
+        else:
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            st.error(f"Отсутствуют необходимые колонки: {missing_columns}")
+            st.info("Пожалуйста, используйте шаблон для правильного формата данных")
+            
+    except Exception as e:
+        st.error(f"Ошибка при чтении файла: {e}")
+        st.info("Убедитесь, что файл не поврежден и имеет правильный формат")
+
+# Если данные загружены, продолжаем анализ
+if 'experimental_data' in st.session_state:
+    df = st.session_state['experimental_data']
     
     # Объединяем с данными о размере зерна
     df_enriched = df.merge(grain_df, left_on='G', right_on='grain_size', how='left')
+    
+    # Проверяем, есть ли соответствие номеров зерен
+    unmatched_grains = df[~df['G'].isin(grain_df['grain_size'])]['G'].unique()
+    if len(unmatched_grains) > 0:
+        st.warning(f"Следующие номера зерен не найдены в базе ГОСТ: {list(unmatched_grains)}")
     
     # Анализ влияния размера зерна
     st.subheader("Анализ влияния размера зерна на рост σ-фазы")
@@ -63,16 +174,17 @@ if uploaded_file:
     # График 1: Зависимость диаметра от времени для разных размеров зерна
     for grain_size in df_enriched['G'].unique():
         subset = df_enriched[df_enriched['G'] == grain_size]
-        grain_area = subset['grain_area'].iloc[0]
-        label = f'Зерно {grain_size} (S={grain_area:.4f} мм²)'
-        
-        ax1.scatter(subset['t'], subset['d'], label=label, alpha=0.7)
-        
-        # Линия тренда
-        if len(subset) > 1:
-            z = np.polyfit(subset['t'], subset['d'], 1)
-            p = np.poly1d(z)
-            ax1.plot(subset['t'], p(subset['t']), linestyle='--', alpha=0.5)
+        if not subset.empty and not pd.isna(subset['grain_area'].iloc[0]):
+            grain_area = subset['grain_area'].iloc[0]
+            label = f'Зерно {grain_size} (S={grain_area:.4f} мм²)'
+            
+            ax1.scatter(subset['t'], subset['d'], label=label, alpha=0.7)
+            
+            # Линия тренда
+            if len(subset) > 1:
+                z = np.polyfit(subset['t'], subset['d'], 1)
+                p = np.poly1d(z)
+                ax1.plot(subset['t'], p(subset['t']), linestyle='--', alpha=0.5)
     
     ax1.set_xlabel('Время (часы)')
     ax1.set_ylabel('Диаметр σ-фазы (мкм)')
@@ -83,10 +195,11 @@ if uploaded_file:
     # График 2: Зависимость скорости роста от площади зерна
     growth_rates = []
     grain_areas = []
+    grain_sizes = []
     
     for grain_size in df_enriched['G'].unique():
         subset = df_enriched[df_enriched['G'] == grain_size]
-        if len(subset) > 1:
+        if len(subset) > 1 and not pd.isna(subset['grain_area'].iloc[0]):
             # Оценка скорости роста (производная)
             time_sorted = np.sort(subset['t'].unique())
             if len(time_sorted) >= 2:
@@ -94,9 +207,15 @@ if uploaded_file:
                 growth_rate = (diameters[-1] - diameters[0]) / (time_sorted[-1] - time_sorted[0])
                 growth_rates.append(growth_rate)
                 grain_areas.append(subset['grain_area'].iloc[0])
+                grain_sizes.append(grain_size)
     
     if growth_rates:
         ax2.scatter(grain_areas, growth_rates, s=80, alpha=0.7)
+        
+        # Добавляем подписи точек
+        for i, (area, rate, size) in enumerate(zip(grain_areas, growth_rates, grain_sizes)):
+            ax2.annotate(f'G{size}', (area, rate), xytext=(5, 5), textcoords='offset points', fontsize=8)
+        
         ax2.set_xlabel('Площадь зерна (мм²)')
         ax2.set_ylabel('Скорость роста (мкм/час)')
         ax2.set_title('Зависимость скорости роста от площади зерна')
@@ -113,85 +232,51 @@ if uploaded_file:
     
     st.pyplot(fig)
     
-    # Калибровка улучшенной модели
-    st.subheader("Калибровка модели с учетом размера зерна")
+    # Кнопка для выгрузки обогащенных данных
+    st.subheader("Выгрузка результатов")
     
-    # Подготовка данных для подбора
-    X = df_enriched[['t', 'grain_area']].values
-    y = df_enriched['d'].values
+    # Создаем обогащенный DataFrame для выгрузки
+    output_df = df_enriched.copy()
     
-    def model_for_fit(X, k, n, alpha):
-        t, grain_area = X[:, 0], X[:, 1]
-        return enhanced_growth_model(t, k, n, grain_area, alpha)
+    # Конвертируем в Excel для выгрузки
+    output_buffer = io.BytesIO()
+    with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+        output_df.to_excel(writer, sheet_name='Обогащенные_данные', index=False)
+        
+        # Добавляем лист с параметрами модели, если они есть
+        if 'enhanced_params' in st.session_state:
+            params_df = pd.DataFrame([st.session_state['enhanced_params']])
+            params_df.to_excel(writer, sheet_name='Параметры_модели', index=False)
     
-    try:
-        # Подбор параметров
-        popt, pcov = curve_fit(model_for_fit, X, y, 
-                              p0=[0.1, 0.5, 0.1], 
-                              bounds=([0, 0, 0], [10, 2, 10]))
-        
-        k_opt, n_opt, alpha_opt = popt
-        
-        st.success("Параметры модели успешно определены!")
-        st.write(f"- Кинетический коэффициент k = {k_opt:.4f}")
-        st.write(f"- Показатель степени n = {n_opt:.4f}")
-        st.write(f"- Коэффициент влияния границ α = {alpha_opt:.4f}")
-        
-        # Визуализация предсказаний
-        fig2, ax = plt.subplots(figsize=(10, 6))
-        
-        colors = plt.cm.viridis(np.linspace(0, 1, len(df_enriched['G'].unique())))
-        
-        for i, grain_size in enumerate(df_enriched['G'].unique()):
-            subset = df_enriched[df_enriched['G'] == grain_size]
-            grain_area = subset['grain_area'].iloc[0]
-            
-            # Экспериментальные данные
-            ax.scatter(subset['t'], subset['d'], color=colors[i], 
-                      label=f'Зерно {grain_size}', alpha=0.7)
-            
-            # Предсказания модели
-            t_range = np.linspace(subset['t'].min(), subset['t'].max(), 100)
-            d_pred = enhanced_growth_model(t_range, k_opt, n_opt, grain_area, alpha_opt)
-            ax.plot(t_range, d_pred, color=colors[i], linestyle='--')
-        
-        ax.set_xlabel('Время (часы)')
-        ax.set_ylabel('Диаметр σ-фазы (мкм)')
-        ax.set_title('Сравнение экспериментальных данных и модели')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
-        
-        st.pyplot(fig2)
-        
-        # Сохранение параметров
-        st.session_state['enhanced_params'] = {
-            'k': k_opt, 'n': n_opt, 'alpha': alpha_opt
-        }
-        
-    except Exception as e:
-        st.error(f"Ошибка при подборе параметров: {e}")
+    output_buffer.seek(0)
+    
+    st.download_button(
+        label="📊 Выгрузить обогащенные данные в Excel",
+        data=output_buffer,
+        file_name="результаты_анализа_сигма_фаза.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Скачайте полные результаты анализа с параметрами модели"
+    )
 
-# Инструмент для прогнозирования
-st.subheader("Прогнозирование роста σ-фазы")
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    time_pred = st.number_input("Время (часы)", value=5000)
-with col2:
-    temp_pred = st.number_input("Температура (°C)", value=600)
-with col3:
-    grain_pred = st.selectbox("Номер зерна", options=grain_df['grain_size'])
-
-if st.button("Рассчитать прогноз") and 'enhanced_params' in st.session_state:
-    params = st.session_state['enhanced_params']
-    grain_area = grain_df[grain_df['grain_size'] == grain_pred]['grain_area'].iloc[0]
+# Информация о поддерживаемых форматах
+with st.expander("ℹ️ Информация о форматах файлов"):
+    st.markdown("""
+    **Поддерживаемые форматы:**
     
-    diameter_pred = enhanced_growth_model(time_pred, params['k'], params['n'], 
-                                        grain_area, params['alpha'])
+    - **CSV**: Текстовый файл с разделителями-запятыми
+    - **Excel**: Файлы .xlsx, .xls (Microsoft Excel)
     
-    st.success(f"Прогнозируемый диаметр σ-фазы: **{diameter_pred:.2f} мкм**")
+    **Требуемые колонки:**
     
-    # Дополнительный анализ
-    st.write("**Анализ влияния размера зерна:**")
-    st.write(f"- Площадь зерна: {grain_area:.6f} мм²")
-    st.write(f"- Эффект границ: {params['alpha']/grain_area:.2f}x ускорение")
+    | Колонка | Описание | Пример |
+    |---------|----------|---------|
+    | G | Номер зерна по ГОСТ 5639-82 | 7, 5, 3 |
+    | T | Температура в °C | 600, 650, 700 |
+    | t | Время выдержки в часах | 2000, 4000, 8000 |
+    | d | Диаметр σ-фазы в мкм | 2.1, 3.0, 4.1 |
+    
+    **Рекомендации:**
+    - Используйте шаблон для гарантии правильного формата
+    - Сохраняйте названия колонок как в шаблоне
+    - Для Excel файлов данные должны быть на первом листе или укажите нужный лист
+    """)

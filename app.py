@@ -6,7 +6,9 @@ from scipy.optimize import curve_fit
 from scipy import stats
 import seaborn as sns
 import io
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.metrics import r2_score, mean_squared_error
+import warnings
+warnings.filterwarnings('ignore')
 
 # Данные из таблицы ГОСТ 5639-82
 grain_data = {
@@ -23,149 +25,28 @@ grain_df = pd.DataFrame(grain_data)
 # Универсальная газовая постоянная
 R = 8.314  # Дж/(моль·К)
 
-# ФИЗИЧЕСКИЕ МОДЕЛИ С УЧЕТОМ ТЕМПЕРАТУРЫ
-def arrhenius_model(T, k0, Q):
-    """Уравнение Аррениуса: k = k0 * exp(-Q/RT)"""
-    return k0 * np.exp(-Q / (R * T))
-
-def growth_model_with_temperature(t, T, k0, Q, n, grain_area, alpha=0.1, d0=0):
-    """
-    Полная модель роста с учетом температуры через Аррениуса:
-    d = d0 + k0 * exp(-Q/RT) * (1 + alpha/grain_area) * t^n
-    """
-    k_arrhenius = arrhenius_model(T, k0, Q)
-    boundary_effect = 1 + alpha / grain_area
-    return d0 + k_arrhenius * boundary_effect * (t ** n)
-
-def universal_growth_model(X, k0, Q, n, alpha, d0=0):
-    """
-    Универсальная модель для всех данных:
-    X = [t, T, grain_area]
-    """
-    t, T, grain_area = X[:, 0], X[:, 1], X[:, 2]
-    k_arrhenius = arrhenius_model(T, k0, Q)
-    boundary_effect = 1 + alpha / grain_area
-    return d0 + k_arrhenius * boundary_effect * (t ** n)
-
-def grain_specific_model(X, k0, Q, n, d0=0):
-    """
-    Модель для конкретного зерна (без учета grain_area в модели):
-    X = [t, T]
-    """
-    t, T = X[:, 0], X[:, 1]
-    k_arrhenius = arrhenius_model(T, k0, Q)
-    return d0 + k_arrhenius * (t ** n)
-
-# Функции для оценки качества модели
-def calculate_metrics(y_true, y_pred):
-    """Расчет метрик качества модели"""
-    r2 = r2_score(y_true, y_pred)
-    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
-    mae = mean_absolute_error(y_true, y_pred)
-    mape = np.mean(np.abs((y_true - y_pred) / np.where(y_true != 0, y_true, 1e-10))) * 100
-    
-    return {
-        'R²': r2,
-        'RMSE': rmse,
-        'MAE': mae,
-        'MAPE': mape
-    }
-
-def plot_residuals(y_true, y_pred, title):
-    """График остатков"""
-    residuals = y_true - y_pred
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-    
-    # Гистограмма остатков
-    ax1.hist(residuals, bins=20, alpha=0.7, edgecolor='black')
-    ax1.axvline(0, color='red', linestyle='--', linewidth=2)
-    ax1.set_xlabel('Остатки')
-    ax1.set_ylabel('Частота')
-    ax1.set_title(f'Распределение остатков\n{title}')
-    ax1.grid(True, alpha=0.3)
-    
-    # Остатки vs предсказанные значения
-    ax2.scatter(y_pred, residuals, alpha=0.7)
-    ax2.axhline(0, color='red', linestyle='--', linewidth=2)
-    ax2.set_xlabel('Предсказанные значения')
-    ax2.set_ylabel('Остатки')
-    ax2.set_title('Остатки vs Предсказания')
-    ax2.grid(True, alpha=0.3)
-    
-    return fig
-
-def plot_arrhenius_analysis(temperatures, k_values, k0, Q, grain_size=None):
-    """График анализа Аррениуса"""
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    T_kelvin = temperatures + 273.15
-    inv_T = 1 / T_kelvin
-    log_k = np.log(k_values)
-    
-    # Экспериментальные точки
-    ax.scatter(inv_T, log_k, s=100, color='blue', alpha=0.7, label='Экспериментальные k')
-    
-    # Линия Аррениуса
-    T_range = np.linspace(T_kelvin.min(), T_kelvin.max(), 100)
-    inv_T_range = 1 / T_range
-    k_range = arrhenius_model(T_range, k0, Q)
-    log_k_range = np.log(k_range)
-    
-    ax.plot(inv_T_range, log_k_range, 'r-', linewidth=2, 
-            label=f'Уравнение Аррениуса\nQ = {Q:.0f} Дж/моль')
-    
-    ax.set_xlabel('1/T (1/K)')
-    ax.set_ylabel('ln(k)')
-    title = 'Анализ Аррениуса'
-    if grain_size:
-        title += f' для зерна {grain_size}'
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    
-    # Добавляем вторую ось с температурами в °C
-    ax2 = ax.twiny()
-    ax2.set_xlim(ax.get_xlim())
-    temp_ticks = np.array([500, 600, 700, 800, 900])
-    inv_temp_ticks = 1 / (temp_ticks + 273.15)
-    ax2.set_xticks(inv_temp_ticks)
-    ax2.set_xticklabels(temp_ticks)
-    ax2.set_xlabel('Температура (°C)')
-    
-    return fig
-
-# Основная программа Streamlit
-st.title("🌡️ Моделирование кинетики роста σ-фазы с учетом температуры")
+st.title("🔬 Поэтапный расчет кинетики роста σ-фазы")
+st.markdown("""
+**Физическая модель:** Диффузионно-контролируемое укрупнение частиц σ-фазы
+- Степенной закон роста: $d^n - d_0^n = K \\cdot t$
+- Температурная зависимость по Аррениусу: $K = K_0(G) \\cdot \\exp(-Q/RT)$
+- Влияние размера зерна: $\\ln K_0(G) = a_0 + a_1 \\cdot Z(G)$
+""")
 
 # Загрузка данных
-st.header("1. Загрузка данных")
+st.header("1. Загрузка и подготовка данных")
 
-def create_template():
-    template_data = {
-        'G': [7, 7, 7, 7, 5, 5, 5, 5, 3, 3, 3, 3],
-        'T': [600, 600, 600, 600, 650, 650, 650, 650, 700, 700, 700, 700],
-        't': [2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000],
-        'd': [2.1, 3.0, 3.6, 4.1, 3.5, 4.8, 5.8, 6.5, 5.2, 7.1, 8.5, 9.6]
-    }
-    return pd.DataFrame(template_data)
+uploaded_file = st.file_uploader("Загрузите файл с данными (CSV или Excel)", 
+                               type=['csv', 'xlsx', 'xls'])
 
-template_df = create_template()
-excel_buffer = io.BytesIO()
-with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
-    template_df.to_excel(writer, sheet_name='Шаблон_данных', index=False)
-excel_buffer.seek(0)
+# Вопросы к пользователю
+st.subheader("Вопросы для уточнения модели:")
+has_sigma_content = st.radio("Есть ли данные о процентном содержании σ-фазы?", 
+                           ["Да", "Нет"])
+initial_diameter = st.number_input("Начальный диаметр d₀ (мкм)", 
+                                 value=0.0, min_value=0.0, step=0.1,
+                                 help="Диаметр на минимальной наработке или близкий к 0")
 
-st.download_button(
-    label="📥 Скачать шаблон Excel",
-    data=excel_buffer,
-    file_name="шаблон_данных_сигма_фаза.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-
-uploaded_file = st.file_uploader("Загрузите файл с данными", type=['csv', 'xlsx', 'xls'])
-
-df = None
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -173,9 +54,13 @@ if uploaded_file is not None:
         else:
             df = pd.read_excel(uploaded_file)
         
-        if all(col in df.columns for col in ['G', 'T', 't', 'd']):
+        required_cols = ['G', 'T', 't', 'd']
+        if has_sigma_content == "Да":
+            required_cols.append('sigma_content')
+        
+        if all(col in df.columns for col in required_cols):
             st.session_state['experimental_data'] = df
-            st.success("Данные успешно загружены!")
+            st.success("✅ Данные успешно загружены!")
             
             # Показываем статистику
             st.subheader("Статистика данных:")
@@ -191,346 +76,369 @@ if uploaded_file is not None:
                 
             st.dataframe(df.head())
         else:
-            st.error("Отсутствуют необходимые колонки: G, T, t, d")
+            missing = [col for col in required_cols if col not in df.columns]
+            st.error(f"❌ Отсутствуют колонки: {missing}")
     except Exception as e:
-        st.error(f"Ошибка загрузки: {e}")
+        st.error(f"❌ Ошибка загрузки: {e}")
 
-# Анализ данных
+# Основной расчет
 if 'experimental_data' in st.session_state:
     df = st.session_state['experimental_data']
-    df_enriched = df.merge(grain_df, left_on='G', right_on='grain_size', how='left')
-    df_enriched['T_K'] = df_enriched['T'] + 273.15  # Температура в Кельвинах
     
-    st.header("2. Подбор коэффициентов моделей с учетом температуры")
+    # Подготовка данных
+    st.header("2. Подготовка данных")
+    df_prep = df.copy()
+    df_prep['T_K'] = df_prep['T'] + 273.15  # Температура в Кельвинах
+    df_prep = df_prep.merge(grain_df, left_on='G', right_on='grain_size', how='left')
     
-    # Выбор модели
-    model_type = st.selectbox(
-        "Выберите тип модели:",
-        ["Индивидуальные модели для каждого зерна", "Универсальная модель для всех зерен"]
-    )
+    st.write("**Данные с температурой в Кельвинах и информацией о зернах:**")
+    st.dataframe(df_prep.head())
     
-    if model_type == "Индивидуальные модели для каждого зерна":
-        st.subheader("Индивидуальные модели для каждого номера зерна")
+    # Выбор показателя степени n
+    st.header("3. Выбор показателя степени n")
+    
+    st.markdown("""
+    **Тестируемые значения n:**
+    - n = 3: Объемная диффузия (классический LSW)
+    - n = 4: Диффузия по границам зерен (ожидается для σ-фазы)
+    - n = 3.5: Промежуточный механизм
+    """)
+    
+    n_candidates = [3.0, 3.5, 4.0]
+    n_results = {}
+    
+    # Анализ для каждого кандидата n
+    for n in n_candidates:
+        st.subheader(f"Анализ для n = {n}")
         
-        individual_results = {}
+        # Для каждого сочетания T и G
+        combinations = df_prep.groupby(['T', 'G']).size().reset_index()[['T', 'G']]
+        k_values = []
         
-        for grain_size in sorted(df['G'].unique()):
-            st.markdown(f"### 🔍 Анализ для зерна {grain_size}")
+        for _, row in combinations.iterrows():
+            temp, grain = row['T'], row['G']
+            subset = df_prep[(df_prep['T'] == temp) & (df_prep['G'] == grain)]
             
-            grain_data = df_enriched[df_enriched['G'] == grain_size]
-            
-            if len(grain_data) >= 4:  # Минимум 4 точки для подбора
-                try:
-                    # Подготовка данных
-                    X_grain = grain_data[['t', 'T_K']].values
-                    y_grain = grain_data['d'].values
-                    
-                    # Подбор параметров модели с температурой
-                    popt, pcov = curve_fit(grain_specific_model, 
-                                         X_grain, 
-                                         y_grain,
-                                         p0=[1.0, 200000, 0.5],  # k0, Q, n
-                                         bounds=([0.001, 100000, 0.1], 
-                                                [1000, 500000, 2.0]))
-                    
-                    k0_opt, Q_opt, n_opt = popt
-                    y_pred = grain_specific_model(X_grain, k0_opt, Q_opt, n_opt)
-                    metrics = calculate_metrics(y_grain, y_pred)
-                    
-                    individual_results[grain_size] = {
-                        'k0': k0_opt,
-                        'Q': Q_opt,
-                        'n': n_opt,
-                        'metrics': metrics,
-                        'predictions': y_pred,
-                        'grain_area': grain_data['grain_area'].iloc[0]
-                    }
-                    
-                    # Вывод результатов
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.write("**Параметры модели:**")
-                        st.write(f"- k₀ = {k0_opt:.4f}")
-                        st.write(f"- Q = {Q_opt:.0f} Дж/моль")
-                        st.write(f"- n = {n_opt:.4f}")
-                        st.write(f"- Площадь зерна = {grain_data['grain_area'].iloc[0]:.6f} мм²")
-                    
-                    with col2:
-                        st.write("**Метрики качества:**")
-                        for metric, value in metrics.items():
-                            st.write(f"- {metric} = {value:.4f}")
-                    
-                    # График Аррениуса для этого зерна
-                    # Сначала найдем k для каждой температуры
-                    temp_k_values = []
-                    temp_values = []
-                    for temp in grain_data['T'].unique():
-                        temp_data = grain_data[grain_data['T'] == temp]
-                        if len(temp_data) >= 2:
-                            # Оцениваем k из данных
-                            try:
-                                popt_temp, _ = curve_fit(lambda t, k: k * (t ** n_opt), 
-                                                       temp_data['t'], temp_data['d'],
-                                                       p0=[0.1])
-                                temp_k_values.append(popt_temp[0])
-                                temp_values.append(temp)
-                            except:
-                                pass
-                    
-                    if len(temp_k_values) >= 2:
-                        arrhenius_fig = plot_arrhenius_analysis(
-                            np.array(temp_values), np.array(temp_k_values), 
-                            k0_opt, Q_opt, grain_size
-                        )
-                        st.pyplot(arrhenius_fig)
-                    
-                    # График модели vs эксперимента
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    
-                    # Разные цвета для разных температур
-                    colors = plt.cm.viridis(np.linspace(0, 1, len(grain_data['T'].unique())))
-                    
-                    for i, temp in enumerate(grain_data['T'].unique()):
-                        temp_data = grain_data[grain_data['T'] == temp]
-                        temp_mask = grain_data['T'] == temp
-                        temp_pred = y_pred[temp_mask]
-                        
-                        ax.scatter(temp_data['t'], temp_data['d'], 
-                                  color=colors[i], label=f'{temp}°C', s=80, alpha=0.7)
-                        
-                        # Линия модели для этой температуры
-                        t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max(), 100)
-                        T_K_const = temp + 273.15
-                        d_pred_range = grain_specific_model(
-                            np.column_stack([t_range, np.full_like(t_range, T_K_const)]), 
-                            k0_opt, Q_opt, n_opt
-                        )
-                        ax.plot(t_range, d_pred_range, color=colors[i], linestyle='--', alpha=0.7)
-                    
-                    ax.set_xlabel('Время (часы)')
-                    ax.set_ylabel('Диаметр σ-фазы (мкм)')
-                    ax.set_title(f'Модель роста для зерна {grain_size}\n'
-                                f'R² = {metrics["R²"]:.3f}')
-                    ax.legend()
-                    ax.grid(True, alpha=0.3)
-                    
-                    st.pyplot(fig)
-                    
-                except Exception as e:
-                    st.error(f"Ошибка подбора для зерна {grain_size}: {e}")
-            else:
-                st.warning(f"Недостаточно данных для зерна {grain_size} (нужно минимум 4 точки)")
+            if len(subset) >= 2:
+                # Вычисляем d^n - d₀^n
+                d_transformed = subset['d']**n - initial_diameter**n
+                
+                # Линейная регрессия: (d^n - d₀^n) = K * t
+                slope, intercept, r_value, p_value, std_err = stats.linregress(
+                    subset['t'], d_transformed
+                )
+                
+                k_values.append({
+                    'T': temp,
+                    'T_K': temp + 273.15,
+                    'G': grain,
+                    'K': max(slope, 1e-10),  # Избегаем отрицательных значений
+                    'R2': r_value**2,
+                    'std_err': std_err,
+                    'grain_area': subset['grain_area'].iloc[0]
+                })
         
-        # Сводная таблица по всем зернам
-        if individual_results:
-            st.subheader("📋 Сводная таблица параметров моделей")
+        if k_values:
+            k_df = pd.DataFrame(k_values)
+            n_results[n] = k_df
             
-            summary_data = []
-            for grain_size, results in individual_results.items():
-                summary_data.append({
-                    'Номер зерна': grain_size,
-                    'Площадь зерна': results['grain_area'],
-                    'k₀': results['k0'],
-                    'Q, Дж/моль': results['Q'],
-                    'n': results['n'],
-                    'R²': results['metrics']['R²'],
-                    'RMSE': results['metrics']['RMSE']
+            # Среднее R² для этого n
+            mean_r2 = k_df['R2'].mean()
+            st.write(f"Средний R² = {mean_r2:.4f}")
+            
+            # Визуализация для нескольких комбинаций
+            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+            
+            # График 1: Линейность преобразованных данных
+            for i, (temp, grain) in enumerate(combinations.head(4).itertuples(index=False)):
+                subset = df_prep[(df_prep['T'] == temp) & (df_prep['G'] == grain)]
+                if len(subset) >= 2:
+                    d_transformed = subset['d']**n - initial_diameter**n
+                    axes[0].scatter(subset['t'], d_transformed, 
+                                  label=f'T={temp}°C, G={grain}', alpha=0.7)
+                    
+                    # Линия регрессии
+                    slope = k_df[(k_df['T'] == temp) & (k_df['G'] == grain)]['K'].iloc[0]
+                    t_range = np.linspace(subset['t'].min(), subset['t'].max(), 100)
+                    axes[0].plot(t_range, slope * t_range, '--', alpha=0.7)
+            
+            axes[0].set_xlabel('Время t (часы)')
+            axes[0].set_ylabel(f'$d^{{{n}}} - d_0^{{{n}}}$')
+            axes[0].set_title(f'Линейность при n = {n}')
+            axes[0].legend()
+            axes[0].grid(True, alpha=0.3)
+            
+            # График 2: Качество подбора по всем точкам
+            all_r2 = []
+            for _, row in k_df.iterrows():
+                all_r2.append(row['R2'])
+            
+            axes[1].hist(all_r2, bins=10, alpha=0.7, edgecolor='black')
+            axes[1].axvline(np.mean(all_r2), color='red', linestyle='--', 
+                          label=f'Среднее R² = {np.mean(all_r2):.3f}')
+            axes[1].set_xlabel('R²')
+            axes[1].set_ylabel('Частота')
+            axes[1].set_title('Распределение R² по всем комбинациям T,G')
+            axes[1].legend()
+            axes[1].grid(True, alpha=0.3)
+            
+            st.pyplot(fig)
+    
+    # Выбор оптимального n
+    st.subheader("Выбор оптимального n")
+    if n_results:
+        n_comparison = []
+        for n, k_df in n_results.items():
+            n_comparison.append({
+                'n': n,
+                'Средний R²': k_df['R2'].mean(),
+                'Минимальный R²': k_df['R2'].min(),
+                'Количество точек': len(k_df)
+            })
+        
+        n_comp_df = pd.DataFrame(n_comparison)
+        st.dataframe(n_comp_df.style.format({
+            'Средний R²': '{:.4f}',
+            'Минимальный R²': '{:.4f}'
+        }).highlight_max(subset=['Средний R²']))
+        
+        # Автоматический выбор n с максимальным средним R²
+        best_n_row = n_comp_df.loc[n_comp_df['Средний R²'].idxmax()]
+        best_n = best_n_row['n']
+        st.success(f"🎯 **Рекомендуемый показатель степени: n = {best_n}**")
+        st.info(f"*Обоснование: максимальный средний R² = {best_n_row['Средний R²']:.4f}*")
+        
+        # Сохраняем лучший результат
+        st.session_state['best_n'] = best_n
+        st.session_state['k_values'] = n_results[best_n]
+        
+        # Анализ Аррениуса
+        st.header("4. Температурная зависимость (уравнение Аррениуса)")
+        
+        k_df = n_results[best_n]
+        
+        # Для каждого номера зерна строим зависимость Аррениуса
+        arrhenius_results = {}
+        
+        for grain in k_df['G'].unique():
+            st.subheader(f"Анализ Аррениуса для зерна {grain}")
+            
+            grain_data = k_df[k_df['G'] == grain]
+            
+            if len(grain_data) >= 2:  # Нужно минимум 2 температуры
+                # Линейная регрессия: ln(K) = ln(K₀) - (Q/R) * (1/T)
+                x = 1 / grain_data['T_K']
+                y = np.log(grain_data['K'])
+                
+                slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+                
+                Q = -slope * R  # Энергия активации
+                K0 = np.exp(intercept)
+                
+                arrhenius_results[grain] = {
+                    'Q': Q,
+                    'K0': K0,
+                    'R2': r_value**2,
+                    'grain_area': grain_data['grain_area'].iloc[0]
+                }
+                
+                # График Аррениуса
+                fig, ax = plt.subplots(figsize=(10, 6))
+                
+                ax.scatter(x, y, s=80, label='Экспериментальные точки')
+                
+                # Линия регрессии
+                x_fit = np.linspace(x.min(), x.max(), 100)
+                y_fit = slope * x_fit + intercept
+                ax.plot(x_fit, y_fit, 'r--', 
+                       label=f'Регрессия: Q = {Q:.0f} Дж/моль\nR² = {r_value**2:.4f}')
+                
+                ax.set_xlabel('1/T (1/K)')
+                ax.set_ylabel('ln(K)')
+                ax.set_title(f'Уравнение Аррениуса для зерна {grain}')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                st.pyplot(fig)
+                
+                st.write(f"**Результаты для зерна {grain}:**")
+                st.write(f"- Энергия активации Q = {Q:.0f} Дж/моль")
+                st.write(f"- Предэкспонента K₀ = {K0:.6f}")
+                st.write(f"- R² = {r_value**2:.4f}")
+        
+        # Учет номера зерна
+        st.header("5. Учет влияния номера зерна")
+        
+        if arrhenius_results:
+            # Создаем DataFrame для регрессии
+            grain_effect_data = []
+            for grain, results in arrhenius_results.items():
+                grain_effect_data.append({
+                    'G': grain,
+                    'ln_K0': np.log(results['K0']),
+                    'grain_area': results['grain_area'],
+                    'Q': results['Q']
                 })
             
-            summary_df = pd.DataFrame(summary_data)
-            st.dataframe(summary_df.style.format({
-                'Площадь зерна': '{:.6f}',
-                'k₀': '{:.4f}',
-                'Q, Дж/моль': '{:.0f}',
-                'n': '{:.4f}',
-                'R²': '{:.4f}',
-                'RMSE': '{:.4f}'
-            }))
+            grain_effect_df = pd.DataFrame(grain_effect_data)
             
-            st.session_state['individual_results'] = individual_results
-    
-    else:  # Универсальная модель
-        st.subheader("Универсальная модель для всех зерен")
-        
-        # Подготовка данных
-        X = df_enriched[['t', 'T_K', 'grain_area']].values
-        y = df_enriched['d'].values
-        
-        try:
-            # Подбор параметров универсальной модели
-            popt, pcov = curve_fit(universal_growth_model, X, y,
-                                 p0=[1.0, 200000, 0.5, 0.01],
-                                 bounds=([0.001, 100000, 0.1, 0], 
-                                        [1000, 500000, 2.0, 1.0]))
+            st.write("**Данные для анализа влияния зерна:**")
+            st.dataframe(grain_effect_df)
             
-            k0_uni, Q_uni, n_uni, alpha_uni = popt
-            y_pred_uni = universal_growth_model(X, k0_uni, Q_uni, n_uni, alpha_uni)
-            metrics_uni = calculate_metrics(y, y_pred_uni)
+            # Выбор метрики Z(G)
+            z_metric = st.selectbox("Выберите метрику для Z(G):",
+                                  ['grain_area', 'G'],
+                                  format_func=lambda x: 'Площадь зерна' if x == 'grain_area' else 'Номер зерна')
             
-            # Вывод параметров
-            st.write("**Параметры универсальной модели:**")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("k₀", f"{k0_uni:.4f}")
-            with col2:
-                st.metric("Q", f"{Q_uni:.0f} Дж/моль")
-            with col3:
-                st.metric("n", f"{n_uni:.4f}")
-            with col4:
-                st.metric("α", f"{alpha_uni:.4f}")
+            # Множественная регрессия
+            X = grain_effect_df[z_metric].values
+            y = grain_effect_df['ln_K0'].values
             
-            st.write("**Метрики качества:**")
-            metrics_cols = st.columns(4)
-            for i, (metric, value) in enumerate(metrics_uni.items()):
-                with metrics_cols[i]:
-                    st.metric(metric, f"{value:.4f}")
+            slope, intercept, r_value, p_value, std_err = stats.linregress(X, y)
             
-            # Анализ Аррениуса для универсальной модели
-            st.subheader("Анализ Аррениуса для универсальной модели")
+            st.success("**Результаты регрессии:**")
+            st.write(f"- a₀ = {intercept:.4f}")
+            st.write(f"- a₁ = {slope:.4f}")
+            st.write(f"- R² = {r_value**2:.4f}")
             
-            # Оценим k для каждой температуры из данных
-            unique_temps = df_enriched['T'].unique()
-            k_estimated = []
-            for temp in unique_temps:
-                temp_data = df_enriched[df_enriched['T'] == temp]
-                if len(temp_data) >= 2:
-                    try:
-                        # Усредненная оценка k для этой температуры
-                        k_temp = arrhenius_model(temp + 273.15, k0_uni, Q_uni)
-                        k_estimated.append(k_temp)
-                    except:
-                        pass
-            
-            if len(k_estimated) >= 2:
-                arrhenius_fig = plot_arrhenius_analysis(
-                    unique_temps[:len(k_estimated)], np.array(k_estimated), 
-                    k0_uni, Q_uni
-                )
-                st.pyplot(arrhenius_fig)
-            
-            # Визуализация предсказаний vs эксперимента
+            # График зависимости
             fig, ax = plt.subplots(figsize=(10, 6))
             
-            colors = plt.cm.viridis(np.linspace(0, 1, len(df_enriched['G'].unique())))
+            ax.scatter(X, y, s=80, label='Экспериментальные точки')
             
-            for i, grain_size in enumerate(df_enriched['G'].unique()):
-                mask = df_enriched['G'] == grain_size
-                subset = df_enriched[mask]
-                pred_subset = y_pred_uni[mask]
-                
-                ax.scatter(subset['d'], pred_subset, 
-                          color=colors[i], label=f'Зерно {grain_size}', 
-                          s=80, alpha=0.7)
+            x_fit = np.linspace(X.min(), X.max(), 100)
+            y_fit = slope * x_fit + intercept
+            ax.plot(x_fit, y_fit, 'r--', 
+                   label=f'Регрессия: ln(K₀) = {intercept:.3f} + {slope:.3f}·Z(G)')
             
-            # Линия идеального предсказания
-            min_val = min(df_enriched['d'].min(), y_pred_uni.min())
-            max_val = max(df_enriched['d'].max(), y_pred_uni.max())
-            ax.plot([min_val, max_val], [min_val, max_val], 'r--', 
-                   label='Идеальное предсказание', linewidth=2)
-            
-            ax.set_xlabel('Экспериментальные значения (мкм)')
-            ax.set_ylabel('Предсказанные значения (мкм)')
-            ax.set_title(f'Универсальная модель: Предсказания vs Эксперимент\n'
-                        f'R² = {metrics_uni["R²"]:.3f}')
-            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            x_label = 'Площадь зерна (мм²)' if z_metric == 'grain_area' else 'Номер зерна G'
+            ax.set_xlabel(x_label)
+            ax.set_ylabel('ln(K₀)')
+            ax.set_title('Зависимость предэкспоненты от размера зерна')
+            ax.legend()
             ax.grid(True, alpha=0.3)
             
             st.pyplot(fig)
             
-            # Таблица сравнения
-            st.subheader("📊 Таблица сравнения значений")
-            
-            comparison_df = df_enriched[['G', 'T', 't', 'd']].copy()
-            comparison_df['Предсказание'] = y_pred_uni
-            comparison_df['Ошибка'] = comparison_df['d'] - comparison_df['Предсказание']
-            comparison_df['|Ошибка|'] = np.abs(comparison_df['Ошибка'])
-            
-            st.dataframe(comparison_df.style.format({
-                'd': '{:.2f}',
-                'Предсказание': '{:.2f}',
-                'Ошибка': '{:.3f}',
-                '|Ошибка|': '{:.3f}'
-            }).background_gradient(subset=['|Ошибка|'], cmap='Reds'))
-            
-            st.session_state['universal_results'] = {
-                'k0': k0_uni, 'Q': Q_uni, 'n': n_uni, 'alpha': alpha_uni,
-                'metrics': metrics_uni, 'predictions': y_pred_uni
+            # Сохраняем финальные параметры
+            st.session_state['final_params'] = {
+                'n': best_n,
+                'Q': grain_effect_df['Q'].mean(),  # Средняя энергия активации
+                'a0': intercept,
+                'a1': slope,
+                'z_metric': z_metric,
+                'd0': initial_diameter
             }
             
-        except Exception as e:
-            st.error(f"Ошибка подбора универсальной модели: {e}")
-            st.info("Попробуйте увеличить количество данных или изменить начальные приближения")
+            # Обратный расчет температуры
+            st.header("6. Обратный расчет температуры эксплуатации")
+            
+            st.markdown("""
+            **Формула для обратного расчета:**
+            $$
+            T = \\frac{Q}{R \\cdot (a_0 + a_1 \\cdot Z(G) - \\ln\\left(\\frac{d^n - d_0^n}{t}\\right))}
+            $$
+            """)
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                d_obs = st.number_input("Наблюдаемый диаметр d (мкм)", 
+                                      value=5.0, min_value=0.1, step=0.1)
+            with col2:
+                t_obs = st.number_input("Время эксплуатации t (часы)", 
+                                      value=5000, min_value=1, step=100)
+            with col3:
+                g_obs = st.selectbox("Номер зерна G", 
+                                   options=sorted(df_prep['G'].unique()))
+            
+            if st.button("Рассчитать температуру"):
+                params = st.session_state['final_params']
+                
+                # Находим Z(G)
+                if params['z_metric'] == 'grain_area':
+                    z_value = grain_df[grain_df['grain_size'] == g_obs]['grain_area'].iloc[0]
+                else:
+                    z_value = g_obs
+                
+                # Вычисляем K_obs
+                k_obs = (d_obs**params['n'] - params['d0']**params['n']) / t_obs
+                
+                # Вычисляем температуру
+                denominator = R * (params['a0'] + params['a1'] * z_value - np.log(max(k_obs, 1e-10)))
+                if denominator > 0:
+                    T_K = params['Q'] / denominator
+                    T_C = T_K - 273.15
+                    
+                    st.success(f"**Расчетная температура эксплуатации: {T_C:.1f}°C**")
+                    
+                    # Детали расчета
+                    st.write("**Детали расчета:**")
+                    st.write(f"- K_obs = {k_obs:.6f}")
+                    st.write(f"- ln(K_obs) = {np.log(k_obs):.4f}")
+                    st.write(f"- Z(G) = {z_value:.6f}")
+                    st.write(f"- Знаменатель = {denominator:.4f}")
+                else:
+                    st.error("Ошибка расчета: отрицательный знаменатель")
+            
+            # Выгрузка результатов
+            st.header("7. Выгрузка результатов")
+            
+            if st.button("📊 Сгенерировать полный отчет"):
+                output_buffer = io.BytesIO()
+                
+                with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+                    # Исходные данные
+                    df_prep.to_excel(writer, sheet_name='Исходные_данные', index=False)
+                    
+                    # Параметры K для лучшего n
+                    k_df.to_excel(writer, sheet_name='Кинетические_коэффициенты', index=False)
+                    
+                    # Результаты Аррениуса
+                    arrhenius_df = pd.DataFrame([
+                        {**{'G': g}, **v} for g, v in arrhenius_results.items()
+                    ])
+                    arrhenius_df.to_excel(writer, sheet_name='Аррениус_анализ', index=False)
+                    
+                    # Финальные параметры модели
+                    final_params_df = pd.DataFrame([st.session_state['final_params']])
+                    final_params_df.to_excel(writer, sheet_name='Финальные_параметры', index=False)
+                
+                output_buffer.seek(0)
+                
+                st.download_button(
+                    label="💾 Скачать полный отчет Excel",
+                    data=output_buffer,
+                    file_name="полный_отчет_сигма_фаза.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
-    # Выгрузка результатов
-    st.header("3. Выгрузка результатов")
-    
-    if st.button("📤 Сгенерировать отчет"):
-        output_buffer = io.BytesIO()
-        
-        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
-            # Исходные данные
-            df_enriched.to_excel(writer, sheet_name='Исходные_данные', index=False)
-            
-            # Параметры моделей
-            if 'individual_results' in st.session_state:
-                ind_results = []
-                for grain_size, results in st.session_state['individual_results'].items():
-                    ind_results.append({
-                        'Номер_зерна': grain_size,
-                        'k0': results['k0'],
-                        'Q_Дж_моль': results['Q'],
-                        'n': results['n'],
-                        'Площадь_зерна': results['grain_area'],
-                        'R2': results['metrics']['R²'],
-                        'RMSE': results['metrics']['RMSE'],
-                        'MAE': results['metrics']['MAE']
-                    })
-                pd.DataFrame(ind_results).to_excel(writer, sheet_name='Индивидуальные_модели', index=False)
-            
-            if 'universal_results' in st.session_state:
-                uni_results = pd.DataFrame([st.session_state['universal_results']])
-                uni_results.to_excel(writer, sheet_name='Универсальная_модель', index=False)
-            
-            # Сравнительная таблица
-            if 'universal_results' in st.session_state:
-                comparison_df.to_excel(writer, sheet_name='Сравнение_значений', index=False)
-        
-        output_buffer.seek(0)
-        
-        st.download_button(
-            label="💾 Скачать полный отчет в Excel",
-            data=output_buffer,
-            file_name="отчет_модели_сигма_фаза.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-# Информация о физической модели
-with st.expander("ℹ️ О физической модели с температурой"):
+# Информация о модели
+with st.expander("📚 Теоретическая справка"):
     st.markdown("""
-    **Полная физическая модель роста σ-фазы:**
+    **Физическая модель диффузионно-контролируемого роста:**
     
-    ```
-    d = k₀ · exp(-Q/RT) · (1 + α/a_i) · tⁿ
-    ```
+    1. **Степенной закон роста:**
+       $$
+       d^n - d_0^n = K \\cdot t
+       $$
     
-    **Параметры модели:**
-    - **k₀**: Предэкспоненциальный множитель
-    - **Q**: Энергия активации (Дж/моль) 
-    - **R**: Универсальная газовая постоянная (8.314 Дж/(моль·К))
-    - **T**: Температура в Кельвинах
-    - **α**: Коэффициент влияния границ зерен
-    - **a_i**: Площадь сечения зерна (мм²)
-    - **n**: Показатель степенного закона роста
-    - **t**: Время (часы)
+    2. **Температурная зависимость (Аррениус):**
+       $$
+       K = K_0(G) \\cdot \\exp\\left(-\\frac{Q}{RT}\\right)
+       $$
     
-    **Физический смысл:**
-    - Температурная зависимость описывается **уравнением Аррениуса**
-    - Влияние размера зерна учитывается через **плотность границ**
-    - Временная зависимость следует **степенному закону роста**
+    3. **Влияние размера зерна:**
+       $$
+       \\ln K_0(G) = a_0 + a_1 \\cdot Z(G)
+       $$
     
-    **Ожидаемые значения:**
-    - Q ≈ 200-300 кДж/моль для диффузионных процессов в сталях
-    - n ≈ 0.3-0.7 для роста фаз
-    - α > 0 (положительное влияние мелкого зерна)
+    **Объединенная модель:**
+    $$
+    \\ln\\left(\\frac{d^n - d_0^n}{t}\\right) = a_0 + a_1 \\cdot Z(G) - \\frac{Q}{RT}
+    $$
+    
+    **Ожидаемые значения параметров:**
+    - n ≈ 4.0 (диффузия по границам зерен)
+    - Q ≈ 200-300 кДж/моль для сталей
+    - a₁ > 0 (мелкое зерно ускоряет рост)
     """)

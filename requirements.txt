@@ -3,7 +3,4 @@ pandas
 numpy
 matplotlib
 scipy
-scikit-learn
-plotly
-openpyxl
-xlrd
+seaborn

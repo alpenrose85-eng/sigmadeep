@@ -3,8 +3,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
+from scipy import stats
 import seaborn as sns
 import io
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 
 # Данные из таблицы ГОСТ 5639-82
 grain_data = {
@@ -18,37 +20,68 @@ grain_data = {
 
 grain_df = pd.DataFrame(grain_data)
 
+# Модели роста
+def basic_growth_model(t, k, n, d0=0):
+    """Базовая модель роста: d = d0 + k * t^n"""
+    return d0 + k * (t ** n)
+
 def enhanced_growth_model(t, k, n, grain_area, alpha=0.5, d0=0):
-    """
-    Улучшенная модель роста с учетом площади зерна
-    d = d0 + k * (1 + alpha/grain_area) * t^n
-    где alpha - коэффициент влияния границ зерен
-    """
+    """Улучшенная модель с учетом площади зерна: d = d0 + k * (1 + alpha/grain_area) * t^n"""
     boundary_effect = 1 + alpha / grain_area
     return d0 + k * boundary_effect * (t ** n)
 
-def boundary_density_model(t, k, n, grain_area, beta=0.1, d0=0):
-    """
-    Альтернативная модель: влияние через плотность границ
-    d = d0 + k * (1 + beta * (1/grain_area)) * t^n
-    """
-    boundary_density_effect = 1 + beta * (1 / grain_area)
-    return d0 + k * boundary_density_effect * (t ** n)
+def universal_growth_model(X, k, n, beta, d0=0):
+    """Универсальная модель для всех зерен: d = d0 + k * (1 + beta/grain_area) * t^n"""
+    t, grain_area = X[:, 0], X[:, 1]
+    boundary_effect = 1 + beta / grain_area
+    return d0 + k * boundary_effect * (t ** n)
+
+# Функции для оценки качества модели
+def calculate_metrics(y_true, y_pred):
+    """Расчет метрик качества модели"""
+    r2 = r2_score(y_true, y_pred)
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+    mae = mean_absolute_error(y_true, y_pred)
+    mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
+    
+    return {
+        'R²': r2,
+        'RMSE': rmse,
+        'MAE': mae,
+        'MAPE': mape
+    }
+
+def plot_residuals(y_true, y_pred, title):
+    """График остатков"""
+    residuals = y_true - y_pred
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    
+    # Гистограмма остатков
+    ax1.hist(residuals, bins=20, alpha=0.7, edgecolor='black')
+    ax1.axvline(0, color='red', linestyle='--', linewidth=2)
+    ax1.set_xlabel('Остатки')
+    ax1.set_ylabel('Частота')
+    ax1.set_title(f'Распределение остатков\n{title}')
+    ax1.grid(True, alpha=0.3)
+    
+    # Остатки vs предсказанные значения
+    ax2.scatter(y_pred, residuals, alpha=0.7)
+    ax2.axhline(0, color='red', linestyle='--', linewidth=2)
+    ax2.set_xlabel('Предсказанные значения')
+    ax2.set_ylabel('Остатки')
+    ax2.set_title('Остатки vs Предсказания')
+    ax2.grid(True, alpha=0.3)
+    
+    return fig
 
 # Основная программа Streamlit
-st.title("Улучшенная модель роста σ-фазы с учетом размера зерна")
-
-# Показываем таблицу ГОСТ
-with st.expander("Данные ГОСТ 5639-82 о размерах зерен"):
-    st.dataframe(grain_df)
-    st.markdown("""
-    **Ключевая идея:** Меньшая площадь зерна → больше границ зерен → больше мест зарождения σ-фазы → ускоренный рост
-    """)
+st.title("📊 Моделирование кинетики роста σ-фазы с подбором коэффициентов")
 
 # Загрузка данных
-st.subheader("Загрузка экспериментальных данных")
+st.header("1. Загрузка данных")
 
-# Создаем шаблон Excel файла для загрузки
+# Создаем шаблон
 def create_template():
     template_data = {
         'G': [7, 7, 7, 7, 5, 5, 5, 5, 3, 3, 3, 3],
@@ -56,227 +89,318 @@ def create_template():
         't': [2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000, 2000, 4000, 6000, 8000],
         'd': [2.1, 3.0, 3.6, 4.1, 3.5, 4.8, 5.8, 6.5, 5.2, 7.1, 8.5, 9.6]
     }
-    df_template = pd.DataFrame(template_data)
-    return df_template
+    return pd.DataFrame(template_data)
 
-# Кнопка для скачивания шаблона
 template_df = create_template()
-
-# Конвертируем DataFrame в Excel файл в памяти
 excel_buffer = io.BytesIO()
 with pd.ExcelWriter(excel_buffer, engine='openpyxl') as writer:
     template_df.to_excel(writer, sheet_name='Шаблон_данных', index=False)
-    # Добавляем лист с описанием
-    description_df = pd.DataFrame({
-        'Колонка': ['G', 'T', 't', 'd'],
-        'Описание': [
-            'Номер зерна по ГОСТ 5639-82',
-            'Температура в °C', 
-            'Время выдержки в часах',
-            'Эквивалентный диаметр σ-фазы в мкм'
-        ],
-        'Пример': ['7, 5, 3', '600, 650, 700', '2000, 4000, 6000, 8000', '2.1, 3.0, 4.1']
-    })
-    description_df.to_excel(writer, sheet_name='Описание_колонок', index=False)
-
 excel_buffer.seek(0)
 
 st.download_button(
-    label="📥 Скачать шаблон Excel файла",
+    label="📥 Скачать шаблон Excel",
     data=excel_buffer,
     file_name="шаблон_данных_сигма_фаза.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    help="Скачайте шаблон для заполнения вашими экспериментальными данными"
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
 
-# Загрузка файла
-uploaded_file = st.file_uploader(
-    "Загрузите файл с экспериментальными данными", 
-    type=['csv', 'xlsx', 'xls'],
-    help="Поддерживаемые форматы: CSV, Excel (.xlsx, .xls)"
-)
+uploaded_file = st.file_uploader("Загрузите файл с данными", type=['csv', 'xlsx', 'xls'])
 
 df = None
-
 if uploaded_file is not None:
     try:
-        # Определяем тип файла и загружаем соответствующим образом
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
-            st.success("CSV файл успешно загружен!")
-        elif uploaded_file.name.endswith(('.xlsx', '.xls')):
-            # Для Excel файлов показываем доступные листы
-            excel_file = pd.ExcelFile(uploaded_file)
-            sheet_names = excel_file.sheet_names
-            
-            if len(sheet_names) == 1:
-                df = pd.read_excel(uploaded_file, sheet_name=sheet_names[0])
-                st.success(f"Excel файл загружен с листа: {sheet_names[0]}")
-            else:
-                selected_sheet = st.selectbox(
-                    "Выберите лист с данными:",
-                    options=sheet_names
-                )
-                df = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
-                st.success(f"Данные загружены с листа: {selected_sheet}")
-        
-        # Проверяем необходимые колонки
-        required_columns = ['G', 'T', 't', 'd']
-        if all(col in df.columns for col in required_columns):
-            st.success("Все необходимые колонки присутствуют!")
-            
-            # Показываем предпросмотр данных
-            st.subheader("Предпросмотр данных")
-            st.dataframe(df.head())
-            
-            # Статистика по данным
-            st.subheader("Статистика данных")
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric("Количество записей", len(df))
-            with col2:
-                st.metric("Уникальные номера зерен", df['G'].nunique())
-            with col3:
-                st.metric("Температуры исследования", f"{df['T'].min()} - {df['T'].max()}°C")
-            with col4:
-                st.metric("Время выдержки", f"{df['t'].min()} - {df['t'].max()} ч")
-            
-            # Сохраняем данные в session_state
-            st.session_state['experimental_data'] = df
-            
         else:
-            missing_columns = [col for col in required_columns if col not in df.columns]
-            st.error(f"Отсутствуют необходимые колонки: {missing_columns}")
-            st.info("Пожалуйста, используйте шаблон для правильного формата данных")
-            
+            df = pd.read_excel(uploaded_file)
+        
+        if all(col in df.columns for col in ['G', 'T', 't', 'd']):
+            st.session_state['experimental_data'] = df
+            st.success("Данные успешно загружены!")
+            st.dataframe(df.head())
+        else:
+            st.error("Отсутствуют необходимые колонки: G, T, t, d")
     except Exception as e:
-        st.error(f"Ошибка при чтении файла: {e}")
-        st.info("Убедитесь, что файл не поврежден и имеет правильный формат")
+        st.error(f"Ошибка загрузки: {e}")
 
-# Если данные загружены, продолжаем анализ
+# Анализ данных
 if 'experimental_data' in st.session_state:
     df = st.session_state['experimental_data']
-    
-    # Объединяем с данными о размере зерна
     df_enriched = df.merge(grain_df, left_on='G', right_on='grain_size', how='left')
     
-    # Проверяем, есть ли соответствие номеров зерен
-    unmatched_grains = df[~df['G'].isin(grain_df['grain_size'])]['G'].unique()
-    if len(unmatched_grains) > 0:
-        st.warning(f"Следующие номера зерен не найдены в базе ГОСТ: {list(unmatched_grains)}")
+    st.header("2. Подбор коэффициентов моделей")
     
-    # Анализ влияния размера зерна
-    st.subheader("Анализ влияния размера зерна на рост σ-фазы")
-    
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-    
-    # График 1: Зависимость диаметра от времени для разных размеров зерна
-    for grain_size in df_enriched['G'].unique():
-        subset = df_enriched[df_enriched['G'] == grain_size]
-        if not subset.empty and not pd.isna(subset['grain_area'].iloc[0]):
-            grain_area = subset['grain_area'].iloc[0]
-            label = f'Зерно {grain_size} (S={grain_area:.4f} мм²)'
-            
-            ax1.scatter(subset['t'], subset['d'], label=label, alpha=0.7)
-            
-            # Линия тренда
-            if len(subset) > 1:
-                z = np.polyfit(subset['t'], subset['d'], 1)
-                p = np.poly1d(z)
-                ax1.plot(subset['t'], p(subset['t']), linestyle='--', alpha=0.5)
-    
-    ax1.set_xlabel('Время (часы)')
-    ax1.set_ylabel('Диаметр σ-фазы (мкм)')
-    ax1.set_title('Влияние размера зерна на кинетику роста')
-    ax1.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-    ax1.grid(True, alpha=0.3)
-    
-    # График 2: Зависимость скорости роста от площади зерна
-    growth_rates = []
-    grain_areas = []
-    grain_sizes = []
-    
-    for grain_size in df_enriched['G'].unique():
-        subset = df_enriched[df_enriched['G'] == grain_size]
-        if len(subset) > 1 and not pd.isna(subset['grain_area'].iloc[0]):
-            # Оценка скорости роста (производная)
-            time_sorted = np.sort(subset['t'].unique())
-            if len(time_sorted) >= 2:
-                diameters = [subset[subset['t'] == t]['d'].mean() for t in time_sorted]
-                growth_rate = (diameters[-1] - diameters[0]) / (time_sorted[-1] - time_sorted[0])
-                growth_rates.append(growth_rate)
-                grain_areas.append(subset['grain_area'].iloc[0])
-                grain_sizes.append(grain_size)
-    
-    if growth_rates:
-        ax2.scatter(grain_areas, growth_rates, s=80, alpha=0.7)
-        
-        # Добавляем подписи точек
-        for i, (area, rate, size) in enumerate(zip(grain_areas, growth_rates, grain_sizes)):
-            ax2.annotate(f'G{size}', (area, rate), xytext=(5, 5), textcoords='offset points', fontsize=8)
-        
-        ax2.set_xlabel('Площадь зерна (мм²)')
-        ax2.set_ylabel('Скорость роста (мкм/час)')
-        ax2.set_title('Зависимость скорости роста от площади зерна')
-        ax2.set_xscale('log')
-        ax2.grid(True, alpha=0.3)
-        
-        # Линия тренда
-        if len(growth_rates) > 1:
-            z = np.polyfit(np.log(grain_areas), growth_rates, 1)
-            x_trend = np.logspace(np.log10(min(grain_areas)), np.log10(max(grain_areas)), 100)
-            y_trend = z[0] * np.log(x_trend) + z[1]
-            ax2.plot(x_trend, y_trend, 'r--', alpha=0.7, label='Тренд')
-            ax2.legend()
-    
-    st.pyplot(fig)
-    
-    # Кнопка для выгрузки обогащенных данных
-    st.subheader("Выгрузка результатов")
-    
-    # Создаем обогащенный DataFrame для выгрузки
-    output_df = df_enriched.copy()
-    
-    # Конвертируем в Excel для выгрузки
-    output_buffer = io.BytesIO()
-    with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
-        output_df.to_excel(writer, sheet_name='Обогащенные_данные', index=False)
-        
-        # Добавляем лист с параметрами модели, если они есть
-        if 'enhanced_params' in st.session_state:
-            params_df = pd.DataFrame([st.session_state['enhanced_params']])
-            params_df.to_excel(writer, sheet_name='Параметры_модели', index=False)
-    
-    output_buffer.seek(0)
-    
-    st.download_button(
-        label="📊 Выгрузить обогащенные данные в Excel",
-        data=output_buffer,
-        file_name="результаты_анализа_сигма_фаза.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        help="Скачайте полные результаты анализа с параметрами модели"
+    # Выбор модели
+    model_type = st.selectbox(
+        "Выберите тип модели:",
+        ["Индивидуальные модели для каждого зерна", "Универсальная модель для всех зерен"]
     )
+    
+    if model_type == "Индивидуальные модели для каждого зерна":
+        st.subheader("Индивидуальные модели для каждого номера зерна")
+        
+        individual_results = {}
+        
+        for grain_size in sorted(df['G'].unique()):
+            st.markdown(f"### 🔍 Анализ для зерна {grain_size}")
+            
+            grain_data = df[df['G'] == grain_size]
+            grain_area = grain_df[grain_df['grain_size'] == grain_size]['grain_area'].iloc[0]
+            
+            if len(grain_data) >= 3:  # Минимум 3 точки для подбора
+                # Подбор параметров базовой модели
+                try:
+                    popt, pcov = curve_fit(basic_growth_model, 
+                                         grain_data['t'], 
+                                         grain_data['d'],
+                                         p0=[0.1, 0.5],
+                                         bounds=([0, 0], [10, 2]))
+                    
+                    k_opt, n_opt = popt
+                    y_pred = basic_growth_model(grain_data['t'], k_opt, n_opt)
+                    metrics = calculate_metrics(grain_data['d'], y_pred)
+                    
+                    individual_results[grain_size] = {
+                        'k': k_opt,
+                        'n': n_opt,
+                        'grain_area': grain_area,
+                        'metrics': metrics,
+                        'predictions': y_pred
+                    }
+                    
+                    # Вывод результатов
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.write("**Параметры модели:**")
+                        st.write(f"- k = {k_opt:.4f}")
+                        st.write(f"- n = {n_opt:.4f}")
+                        st.write(f"- Площадь зерна = {grain_area:.6f} мм²")
+                    
+                    with col2:
+                        st.write("**Метрики качества:**")
+                        for metric, value in metrics.items():
+                            st.write(f"- {metric} = {value:.4f}")
+                    
+                    # График
+                    fig, ax = plt.subplots(figsize=(10, 6))
+                    
+                    # Экспериментальные точки
+                    ax.scatter(grain_data['t'], grain_data['d'], color='blue', 
+                              label='Эксперимент', s=80, alpha=0.7)
+                    
+                    # Предсказания модели
+                    t_range = np.linspace(grain_data['t'].min(), grain_data['t'].max(), 100)
+                    d_pred_range = basic_growth_model(t_range, k_opt, n_opt)
+                    ax.plot(t_range, d_pred_range, 'r-', label='Модель', linewidth=2)
+                    
+                    # Соединяем точки линиями
+                    sorted_indices = np.argsort(grain_data['t'])
+                    ax.plot(grain_data['t'].iloc[sorted_indices], 
+                           grain_data['d'].iloc[sorted_indices], 
+                           'b--', alpha=0.5)
+                    
+                    ax.set_xlabel('Время (часы)')
+                    ax.set_ylabel('Диаметр σ-фазы (мкм)')
+                    ax.set_title(f'Модель роста для зерна {grain_size}\n'
+                                f'R² = {metrics["R²"]:.3f}, RMSE = {metrics["RMSE"]:.3f}')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+                    
+                    st.pyplot(fig)
+                    
+                    # График остатков
+                    resid_fig = plot_residuals(grain_data['d'], y_pred, f'Зерно {grain_size}')
+                    st.pyplot(resid_fig)
+                    
+                except Exception as e:
+                    st.error(f"Ошибка подбора для зерна {grain_size}: {e}")
+            else:
+                st.warning(f"Недостаточно данных для зерна {grain_size} (нужно минимум 3 точки)")
+        
+        # Сводная таблица по всем зернам
+        if individual_results:
+            st.subheader("📋 Сводная таблица параметров моделей")
+            
+            summary_data = []
+            for grain_size, results in individual_results.items():
+                summary_data.append({
+                    'Номер зерна': grain_size,
+                    'Площадь зерна': results['grain_area'],
+                    'k': results['k'],
+                    'n': results['n'],
+                    'R²': results['metrics']['R²'],
+                    'RMSE': results['metrics']['RMSE'],
+                    'MAE': results['metrics']['MAE']
+                })
+            
+            summary_df = pd.DataFrame(summary_data)
+            st.dataframe(summary_df.style.format({
+                'Площадь зерна': '{:.6f}',
+                'k': '{:.4f}',
+                'n': '{:.4f}',
+                'R²': '{:.4f}',
+                'RMSE': '{:.4f}',
+                'MAE': '{:.4f}'
+            }))
+            
+            st.session_state['individual_results'] = individual_results
+    
+    else:  # Универсальная модель
+        st.subheader("Универсальная модель для всех зерен")
+        
+        # Подготовка данных
+        X = df_enriched[['t', 'grain_area']].values
+        y = df_enriched['d'].values
+        
+        try:
+            # Подбор параметров универсальной модели
+            popt, pcov = curve_fit(universal_growth_model, X, y,
+                                 p0=[0.1, 0.5, 0.1],
+                                 bounds=([0, 0, 0], [10, 2, 10]))
+            
+            k_uni, n_uni, beta_uni = popt
+            y_pred_uni = universal_growth_model(X, k_uni, n_uni, beta_uni)
+            metrics_uni = calculate_metrics(y, y_pred_uni)
+            
+            # Вывод параметров
+            st.write("**Параметры универсальной модели:**")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("k", f"{k_uni:.4f}")
+            with col2:
+                st.metric("n", f"{n_uni:.4f}")
+            with col3:
+                st.metric("β", f"{beta_uni:.4f}")
+            
+            st.write("**Метрики качества:**")
+            metrics_cols = st.columns(4)
+            for i, (metric, value) in enumerate(metrics_uni.items()):
+                with metrics_cols[i]:
+                    st.metric(metric, f"{value:.4f}")
+            
+            # Визуализация предсказаний vs эксперимента
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            colors = plt.cm.viridis(np.linspace(0, 1, len(df_enriched['G'].unique())))
+            
+            for i, grain_size in enumerate(df_enriched['G'].unique()):
+                mask = df_enriched['G'] == grain_size
+                subset = df_enriched[mask]
+                pred_subset = y_pred_uni[mask]
+                
+                ax.scatter(subset['d'], pred_subset, 
+                          color=colors[i], label=f'Зерно {grain_size}', 
+                          s=80, alpha=0.7)
+            
+            # Линия идеального предсказания
+            min_val = min(df_enriched['d'].min(), y_pred_uni.min())
+            max_val = max(df_enriched['d'].max(), y_pred_uni.max())
+            ax.plot([min_val, max_val], [min_val, max_val], 'r--', 
+                   label='Идеальное предсказание', linewidth=2)
+            
+            ax.set_xlabel('Экспериментальные значения (мкм)')
+            ax.set_ylabel('Предсказанные значения (мкм)')
+            ax.set_title(f'Универсальная модель: Предсказания vs Эксперимент\n'
+                        f'R² = {metrics_uni["R²"]:.3f}')
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            ax.grid(True, alpha=0.3)
+            
+            st.pyplot(fig)
+            
+            # График остатков
+            resid_fig = plot_residuals(y, y_pred_uni, "Универсальная модель")
+            st.pyplot(resid_fig)
+            
+            # Таблица сравнения экспериментальных и предсказанных значений
+            st.subheader("📊 Таблица сравнения значений")
+            
+            comparison_df = df_enriched[['G', 'T', 't', 'd']].copy()
+            comparison_df['Предсказание'] = y_pred_uni
+            comparison_df['Ошибка'] = comparison_df['d'] - comparison_df['Предсказание']
+            comparison_df['|Ошибка|'] = np.abs(comparison_df['Ошибка'])
+            
+            st.dataframe(comparison_df.style.format({
+                'd': '{:.2f}',
+                'Предсказание': '{:.2f}',
+                'Ошибка': '{:.3f}',
+                '|Ошибка|': '{:.3f}'
+            }).background_gradient(subset=['|Ошибка|'], cmap='Reds'))
+            
+            st.session_state['universal_results'] = {
+                'k': k_uni, 'n': n_uni, 'beta': beta_uni,
+                'metrics': metrics_uni, 'predictions': y_pred_uni
+            }
+            
+        except Exception as e:
+            st.error(f"Ошибка подбора универсальной модели: {e}")
+    
+    # Выгрузка результатов
+    st.header("3. Выгрузка результатов")
+    
+    if st.button("📤 Сгенерировать отчет"):
+        output_buffer = io.BytesIO()
+        
+        with pd.ExcelWriter(output_buffer, engine='openpyxl') as writer:
+            # Исходные данные
+            df_enriched.to_excel(writer, sheet_name='Исходные_данные', index=False)
+            
+            # Параметры моделей
+            if 'individual_results' in st.session_state:
+                ind_results = []
+                for grain_size, results in st.session_state['individual_results'].items():
+                    ind_results.append({
+                        'Номер_зерна': grain_size,
+                        'k': results['k'],
+                        'n': results['n'],
+                        'Площадь_зерна': results['grain_area'],
+                        'R2': results['metrics']['R²'],
+                        'RMSE': results['metrics']['RMSE'],
+                        'MAE': results['metrics']['MAE'],
+                        'MAPE': results['metrics']['MAPE']
+                    })
+                pd.DataFrame(ind_results).to_excel(writer, sheet_name='Индивидуальные_модели', index=False)
+            
+            if 'universal_results' in st.session_state:
+                uni_results = pd.DataFrame([st.session_state['universal_results']])
+                uni_results.to_excel(writer, sheet_name='Универсальная_модель', index=False)
+            
+            # Сравнительная таблица
+            if 'universal_results' in st.session_state:
+                comparison_df.to_excel(writer, sheet_name='Сравнение_значений', index=False)
+        
+        output_buffer.seek(0)
+        
+        st.download_button(
+            label="💾 Скачать полный отчет в Excel",
+            data=output_buffer,
+            file_name="отчет_модели_сигма_фаза.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
 
-# Информация о поддерживаемых форматах
-with st.expander("ℹ️ Информация о форматах файлов"):
+# Информация о моделях
+with st.expander("ℹ️ О физических моделях"):
     st.markdown("""
-    **Поддерживаемые форматы:**
+    **Используемые физические модели:**
     
-    - **CSV**: Текстовый файл с разделителями-запятыми
-    - **Excel**: Файлы .xlsx, .xls (Microsoft Excel)
+    1. **Индивидуальные модели для каждого зерна:**
+       ```
+       d = k · tⁿ
+       ```
+       - Подбираются отдельные коэффициенты k, n для каждого номера зерна
+       - Учитывает специфику кинетики роста для разных микроструктур
     
-    **Требуемые колонки:**
+    2. **Универсальная модель для всех зерен:**
+       ```
+       d = k · (1 + β/a_i) · tⁿ
+       ```
+       - Единые коэффициенты k, n, β для всех данных
+       - Коэффициент β учитывает влияние границ зерен через площадь a_i
+       - Более универсальная, но требует больше данных для калибровки
     
-    | Колонка | Описание | Пример |
-    |---------|----------|---------|
-    | G | Номер зерна по ГОСТ 5639-82 | 7, 5, 3 |
-    | T | Температура в °C | 600, 650, 700 |
-    | t | Время выдержки в часах | 2000, 4000, 8000 |
-    | d | Диаметр σ-фазы в мкм | 2.1, 3.0, 4.1 |
-    
-    **Рекомендации:**
-    - Используйте шаблон для гарантии правильного формата
-    - Сохраняйте названия колонок как в шаблоне
-    - Для Excel файлов данные должны быть на первом листе или укажите нужный лист
+    **Метрики качества:**
+    - **R²**: Коэффициент детерминации (ближе к 1 = лучше)
+    - **RMSE**: Среднеквадратичная ошибка
+    - **MAE**: Средняя абсолютная ошибка  
+    - **MAPE**: Средняя абсолютная процентная ошибка
     """)

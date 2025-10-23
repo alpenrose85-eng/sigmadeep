@@ -19,6 +19,7 @@ st.markdown("""
 - Полная оценка ошибок для всех температур
 - Детальная диагностика расхождений модели и эксперимента
 - Объяснения всех графиков и метрик
+- **НОВОЕ: Анализ содержания σ-фазы по JMAK-модели**
 """)
 
 # Загрузка данных
@@ -29,9 +30,15 @@ uploaded_file = st.file_uploader("Загрузите файл с данными 
 
 # Параметры анализа
 st.subheader("Параметры анализа:")
-initial_diameter = st.number_input("Начальный диаметр d₀ (мкм)", 
-                                 value=0.1, min_value=0.0, step=0.1,
-                                 help="Рекомендуется использовать небольшое положительное значение (0.1-0.5 мкм)")
+col1, col2 = st.columns(2)
+with col1:
+    initial_diameter = st.number_input("Начальный диаметр d₀ (мкм)", 
+                                     value=0.1, min_value=0.0, step=0.1,
+                                     help="Рекомендуется использовать небольшое положительное значение (0.1-0.5 мкм)")
+with col2:
+    enable_phase_analysis = st.checkbox("Включить анализ содержания фазы (JMAK)", 
+                                      value=True, 
+                                      help="Анализ кинетики фазового превращения по содержанию σ-фазы")
 
 target_grain = 10
 
@@ -125,6 +132,45 @@ def safe_plot_with_diagnostics(ax, t_exp, y_exp, y_pred, t_range=None, y_range=N
                 transform=ax.transAxes, ha='center', va='center', fontsize=8)
         ax.set_title(title)
 
+# Функции для JMAK-анализа
+def jmak_model(t, k, n):
+    """JMAK модель: X(t) = 1 - exp(-(k*t)^n)"""
+    return 1 - np.exp(-(k * t) ** n)
+
+def fit_jmak_model(time, f_phase, initial_n=1.0):
+    """Подбор параметров JMAK модели"""
+    # Преобразуем проценты в доли (0-1)
+    f_normalized = np.array(f_phase) / 100.0
+    
+    # Проверяем, что данные валидны
+    valid_mask = ~np.isnan(time) & ~np.isnan(f_normalized) & (f_normalized >= 0) & (f_normalized <= 1)
+    time_valid = time[valid_mask]
+    f_valid = f_normalized[valid_mask]
+    
+    if len(time_valid) < 2:
+        return None, None, None
+    
+    try:
+        # Начальные приближения
+        k_guess = 1.0 / np.mean(time_valid) if np.mean(time_valid) > 0 else 0.1
+        
+        # Подгонка модели
+        popt, pcov = curve_fit(jmak_model, time_valid, f_valid, 
+                              p0=[k_guess, initial_n],
+                              bounds=([1e-6, 0.1], [10, 4]),
+                              maxfev=5000)
+        
+        k_fit, n_fit = popt
+        return k_fit, n_fit, pcov
+    
+    except Exception as e:
+        st.warning(f"Ошибка подбора JMAK для температуры: {e}")
+        return None, None, None
+
+def calculate_jmak_predictions(time, k, n):
+    """Расчет предсказаний JMAK модели"""
+    return jmak_model(time, k, n) * 100  # Возвращаем в процентах
+
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -143,7 +189,7 @@ if uploaded_file is not None:
                 
                 # Статистика
                 st.subheader("📊 Статистика данных для зерна №10:")
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     unique_temps = df_grain10['T'].unique()
                     st.metric("Температуры", f"{len(unique_temps)} уровней")
@@ -151,6 +197,8 @@ if uploaded_file is not None:
                     st.metric("Всего точек", f"{len(df_grain10)}")
                 with col3:
                     st.metric("Диапазон времени", f"{df_grain10['t'].min()}-{df_grain10['t'].max()} ч")
+                with col4:
+                    st.metric("Содержание фазы", f"{df_grain10['f'].min():.1f}-{df_grain10['f'].max():.1f}%")
                 
                 # Проверка данных на аномалии
                 st.subheader("🔍 Проверка данных на аномалии")
@@ -427,10 +475,188 @@ if 'grain10_data' in st.session_state:
                       '🔴 Требуется улучшение модели'}
                     """)
 
-    st.header("3. 📊 Анализ содержания σ-фазы (JMAK-модель)")
-    
-    # Остальной код JMAK-анализа остается аналогичным с использованием safe_plot_with_diagnostics
-    # ... [JMAK анализ аналогично диаметрам]
+    # НОВЫЙ РАЗДЕЛ: Анализ содержания σ-фазы по JMAK-модели
+    if enable_phase_analysis:
+        st.header("3. 📊 Анализ содержания σ-фазы (JMAK-модель)")
+        
+        with st.expander("💡 Объяснение JMAK-анализа"):
+            st.markdown("""
+            **Что анализируем:** Кинетику фазового превращения по изменению объемной доли σ-фазы
+            
+            **Физическая модель (Johnson-Mehl-Avrami-Kolmogorov):**
+            $$ X(t) = 1 - \\exp\\left(-(k \\cdot t)^n\\right) $$
+            
+            **Параметры модели:**
+            - **k** - константа скорости превращения
+            - **n** - показатель Аврами (характеризует механизм превращения)
+            
+            **Типичные значения n:**
+            - n ≈ 1 - насыщение центров зарождения
+            - n ≈ 2-4 - зарождение и рост (диффузионный контроль)
+            
+            **Как оценивать результат:**
+            - R² > 0.95 - отличное согласие
+            - Остатки должны быть случайными
+            - Модель должна хорошо описывать S-образную кривую
+            """)
+        
+        # Подбор параметров JMAK для каждой температуры
+        st.subheader("Подбор параметров JMAK-модели")
+        
+        jmak_results = {}
+        all_phase_actual = []
+        all_phase_predicted = []
+        all_phase_temperatures = []
+        
+        for temp in df_grain10['T'].unique():
+            temp_data = df_grain10[df_grain10['T'] == temp].copy()
+            
+            if len(temp_data) >= 3:  # Минимум 3 точки для подбора
+                k_fit, n_fit, pcov = fit_jmak_model(temp_data['t'].values, temp_data['f'].values)
+                
+                if k_fit is not None and n_fit is not None:
+                    # Расчет предсказаний
+                    f_pred = calculate_jmak_predictions(temp_data['t'].values, k_fit, n_fit)
+                    metrics = calculate_comprehensive_metrics(temp_data['f'].values, f_pred)
+                    
+                    jmak_results[temp] = {
+                        'k': k_fit, 'n': n_fit, 'metrics': metrics,
+                        'data': temp_data, 'predictions': f_pred
+                    }
+                    
+                    # Собираем данные для общего анализа
+                    all_phase_actual.extend(temp_data['f'].values)
+                    all_phase_predicted.extend(f_pred)
+                    all_phase_temperatures.extend([temp] * len(temp_data))
+        
+        # Визуализация результатов JMAK
+        if jmak_results:
+            # Создаем таблицу результатов
+            results_data = []
+            for temp, results in jmak_results.items():
+                results_data.append({
+                    'Температура (°C)': temp,
+                    'k (ч⁻¹)': results['k'],
+                    'n': results['n'],
+                    'R²': results['metrics']['R²'],
+                    'RMSE': results['metrics']['RMSE'],
+                    'MAPE': results['metrics']['MAPE']
+                })
+            
+            results_df = pd.DataFrame(results_data)
+            st.subheader("Параметры JMAK-модели по температурам")
+            st.dataframe(results_df.style.format({
+                'k (ч⁻¹)': '{:.4f}',
+                'n': '{:.3f}',
+                'R²': '{:.3f}',
+                'RMSE': '{:.2f}',
+                'MAPE': '{:.1f}'
+            }))
+            
+            # Графики для каждой температуры
+            st.subheader("Визуализация JMAK-подбора по температурам")
+            
+            temps_jmak = sorted(jmak_results.keys())
+            n_cols = min(2, len(temps_jmak))
+            n_rows = (len(temps_jmak) + n_cols - 1) // n_cols
+            
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
+            
+            if n_rows == 1 and n_cols == 1:
+                axes = np.array([[axes]])
+            elif n_rows == 1:
+                axes = np.array([axes])
+            elif n_cols == 1:
+                axes = axes.reshape(-1, 1)
+            
+            for idx, temp in enumerate(temps_jmak):
+                if idx < n_rows * n_cols:
+                    row = idx // n_cols
+                    col = idx % n_cols
+                    
+                    ax = axes[row, col]
+                    results = jmak_results[temp]
+                    temp_data = results['data']
+                    
+                    # Экспериментальные точки
+                    ax.scatter(temp_data['t'], temp_data['f'], alpha=0.8, s=60, 
+                              label='Эксперимент', color='blue')
+                    
+                    # JMAK кривая
+                    t_range = np.linspace(0, temp_data['t'].max() * 1.2, 100)
+                    f_range = calculate_jmak_predictions(t_range, results['k'], results['n'])
+                    ax.plot(t_range, f_range, 'r--', linewidth=2, 
+                           label=f'JMAK (k={results["k"]:.3f}, n={results["n"]:.2f})')
+                    
+                    ax.set_xlabel('Время (часы)')
+                    ax.set_ylabel('Содержание фазы (%)')
+                    ax.set_title(f'Температура {temp}°C\nR² = {results["metrics"]["R²"]:.3f}')
+                    ax.legend()
+                    ax.grid(True, alpha=0.3)
+            
+            # Скрываем пустые subplots
+            for idx in range(len(temps_jmak), n_rows * n_cols):
+                row = idx // n_cols
+                col = idx % n_cols
+                axes[row, col].set_visible(False)
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+            # Анализ расхождений JMAK модели
+            if len(all_phase_actual) > 0:
+                st.subheader("📊 Анализ расхождений JMAK-модели")
+                
+                fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+                
+                residuals = np.array(all_phase_actual) - np.array(all_phase_predicted)
+                
+                # График 1: Остатки vs предсказания
+                ax1.scatter(all_phase_predicted, residuals, alpha=0.7)
+                ax1.axhline(0, color='red', linestyle='--', label='Нулевая ошибка')
+                ax1.set_xlabel('Предсказанные значения содержания фазы (%)')
+                ax1.set_ylabel('Остатки = Факт - Прогноз (%)')
+                ax1.set_title('Остатки JMAK-модели\n(чем ближе к нулю - тем лучше)')
+                ax1.legend()
+                ax1.grid(True, alpha=0.3)
+                
+                # График 2: Фактические vs предсказанные значения
+                scatter = ax2.scatter(all_phase_actual, all_phase_predicted, alpha=0.7, 
+                                    c=all_phase_temperatures, cmap='viridis', s=60)
+                ax2.plot([0, 100], [0, 100], 'r--', linewidth=2, label='Идеальное согласие')
+                ax2.set_xlabel('Фактическое содержание фазы (%)')
+                ax2.set_ylabel('Предсказанное содержание фазы (%)')
+                ax2.set_title('Фактические vs предсказанные значения\nJMAK-модели')
+                ax2.legend()
+                ax2.grid(True, alpha=0.3)
+                
+                cbar = plt.colorbar(scatter, ax=ax2)
+                cbar.set_label('Температура (°C)')
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                
+                # Общая статистика JMAK
+                overall_phase_metrics = calculate_comprehensive_metrics(
+                    np.array(all_phase_actual), np.array(all_phase_predicted)
+                )
+                
+                st.info(f"""
+                **📈 Общая статистика JMAK-модели:**
+                - **R² = {overall_phase_metrics['R²']:.3f}** - доля объясненной дисперсии
+                - **RMSE = {overall_phase_metrics['RMSE']:.2f}%** - средняя ошибка предсказания
+                - **MAE = {overall_phase_metrics['MAE']:.2f}%** - средняя абсолютная ошибка
+                - **MAPE = {overall_phase_metrics['MAPE']:.1f}%** - средняя процентная ошибка
+                
+                **🎯 Оценка качества:**
+                { '✅ Отличное согласие' if overall_phase_metrics['R²'] > 0.95 else 
+                  '🟡 Хорошее согласие' if overall_phase_metrics['R²'] > 0.85 else 
+                  '🟠 Умеренное согласие' if overall_phase_metrics['R²'] > 0.7 else 
+                  '🔴 Требуется улучшение модели'}
+                """)
+        
+        else:
+            st.warning("❌ Не удалось подобрать параметры JMAK-модели для доступных данных")
 
 st.header("🎯 Рекомендации по улучшению модели")
 
@@ -456,4 +682,9 @@ st.markdown("""
 - Остаток = Фактический диаметр - Предсказанный диаметр
 - Отрицательный остаток означает, что модель переоценила диаметр
 - Положительный остаток - модель недооценила диаметр
+
+**Для JMAK-анализа:**
+- Убедитесь, что данные охватывают всю S-образную кривую
+- Проверьте физическую осмысленность параметров n
+- Рассмотрите возможность фиксации n для всех температур
 """)

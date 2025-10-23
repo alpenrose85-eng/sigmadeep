@@ -36,33 +36,32 @@ initial_diameter = st.number_input("Начальный диаметр d₀ (мк
 target_grain = 10
 
 # Функции для расчета метрик качества
-def calculate_comprehensive_metrics(y_true, y_pred, y_pred_range=None, t_range=None):
+def calculate_comprehensive_metrics(y_true, y_pred):
     """Расчет комплексных метрик качества модели"""
+    if len(y_true) == 0 or len(y_pred) == 0:
+        return {'R²': 0, 'RMSE': 0, 'MAE': 0, 'MAPE': 0}
+    
     metrics = {
         'R²': r2_score(y_true, y_pred),
         'RMSE': np.sqrt(mean_squared_error(y_true, y_pred)),
         'MAE': mean_absolute_error(y_true, y_pred),
         'MAPE': np.mean(np.abs((y_true - y_pred) / np.where(y_true != 0, y_true, 1e-10))) * 100
     }
-    
-    # Дополнительные метрики если есть данные для прогноза
-    if y_pred_range is not None and t_range is not None:
-        # Оценка монотонности производной (физическая осмысленность)
-        if len(y_pred_range) > 1:
-            derivative = np.diff(y_pred_range) / np.diff(t_range)
-            metrics['Монотонность'] = "Да" if np.all(derivative >= 0) else "Нет"
-    
     return metrics
 
 def plot_with_diagnostics(ax, t_exp, y_exp, y_pred, t_range=None, y_range=None, 
                          title="", xlabel="Время (часы)", ylabel="", 
                          model_name="Модель"):
     """Улучшенная визуализация с диагностикой"""
+    if len(t_exp) == 0:
+        ax.text(0.5, 0.5, 'Нет данных', transform=ax.transAxes, ha='center')
+        return
+    
     # Экспериментальные точки
     ax.scatter(t_exp, y_exp, alpha=0.8, s=60, label='Эксперимент', color='blue')
     
     # Предсказания модели
-    if t_range is not None and y_range is not None:
+    if t_range is not None and y_range is not None and len(t_range) > 0:
         ax.plot(t_range, y_range, 'r--', linewidth=2, label=model_name)
     
     # Соединяем экспериментальные точки
@@ -154,6 +153,7 @@ if 'grain10_data' in st.session_state:
     n_candidates = np.arange(n_min, n_max + n_step, n_step)
     
     n_results = {}
+    available_temperatures = set()
     
     for n in n_candidates:
         k_values = []
@@ -181,7 +181,9 @@ if 'grain10_data' in st.session_state:
                             'R2': r_value**2, 'std_err': std_err,
                             'n_points': len(temp_data), 'metrics': metrics
                         })
-                except:
+                        available_temperatures.add(temp)
+                except Exception as e:
+                    st.write(f"Ошибка для n={n}, T={temp}: {e}")
                     continue
         
         if k_values:
@@ -203,157 +205,179 @@ if 'grain10_data' in st.session_state:
             })
         
         comparison_df = pd.DataFrame(comparison_data)
-        best_n_row = comparison_df.loc[comparison_df['Средний R²'].idxmax()]
-        best_n = best_n_row['n']
         
-        st.success(f"🎯 Оптимальный показатель: n = {best_n:.1f} (R² = {best_n_row['Средний R²']:.3f})")
-        
-        # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
-        st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")
-        
-        best_k_df = n_results[best_n]['k_df']
-        
-        # Визуализация для всех температур
-        temps = sorted(df_grain10['T'].unique())
-        n_cols = 2
-        n_rows = (len(temps) + n_cols - 1) // n_cols
-        
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5*n_rows))
-        if n_rows == 1:
-            axes = [axes] if n_cols == 1 else axes
-        
-        for idx, temp in enumerate(temps):
-            if idx < n_rows * n_cols:
-                row = idx // n_cols
-                col = idx % n_cols
+        if len(comparison_df) > 0:
+            best_n_row = comparison_df.loc[comparison_df['Средний R²'].idxmax()]
+            best_n = best_n_row['n']
+            
+            st.success(f"🎯 Оптимальный показатель: n = {best_n:.1f} (R² = {best_n_row['Средний R²']:.3f})")
+            
+            # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
+            st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")
+            
+            best_k_df = n_results[best_n]['k_df']
+            
+            # Визуализация для всех температур с данными
+            temps_with_data = sorted(available_temperatures)
+            
+            if len(temps_with_data) > 0:
+                n_cols = 2
+                n_rows = (len(temps_with_data) + n_cols - 1) // n_cols
                 
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(15, 5*n_rows))
                 if n_rows == 1:
-                    ax = axes[col]
-                else:
-                    ax = axes[row, col]
+                    axes = [axes] if n_cols == 1 else axes
+                elif n_cols == 1:
+                    axes = [[ax] for ax in axes]
                 
-                temp_data = df_grain10[df_grain10['T'] == temp]
-                k_value = best_k_df[best_k_df['T'] == temp]['K'].iloc[0]
+                for idx, temp in enumerate(temps_with_data):
+                    if idx < n_rows * n_cols:
+                        row = idx // n_cols
+                        col = idx % n_cols
+                        
+                        # Безопасное получение ax
+                        if n_rows == 1:
+                            ax = axes[col] if isinstance(axes, list) else axes
+                        else:
+                            ax = axes[row][col] if isinstance(axes[0], list) else axes[row, col]
+                        
+                        temp_data = df_grain10[df_grain10['T'] == temp]
+                        
+                        # Безопасное получение k_value
+                        temp_k_data = best_k_df[best_k_df['T'] == temp]
+                        if len(temp_k_data) > 0:
+                            k_value = temp_k_data['K'].iloc[0]
+                            
+                            # Расчет предсказаний
+                            t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max() * 1.2, 100)
+                            d_pred_range = (k_value * t_range + initial_diameter**best_n)**(1/best_n)
+                            
+                            d_pred_points = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
+                            
+                            plot_with_diagnostics(
+                                ax, temp_data['t'], temp_data['d'], d_pred_points,
+                                t_range, d_pred_range, 
+                                title=f'Температура {temp}°C',
+                                ylabel='Диаметр (мкм)',
+                                model_name=f'Модель (n={best_n:.1f})'
+                            )
+                        else:
+                            ax.text(0.5, 0.5, f'Нет данных для {temp}°C', 
+                                   transform=ax.transAxes, ha='center')
+                            ax.set_title(f'Температура {temp}°C - нет данных')
                 
-                # Расчет предсказаний
-                t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max() * 1.2, 100)
-                d_pred_range = (k_value * t_range + initial_diameter**best_n)**(1/best_n)
+                # Скрываем пустые subplots
+                for idx in range(len(temps_with_data), n_rows * n_cols):
+                    row = idx // n_cols
+                    col = idx % n_cols
+                    if n_rows == 1:
+                        if isinstance(axes, list) and col < len(axes):
+                            axes[col].set_visible(False)
+                    else:
+                        if (isinstance(axes, np.ndarray) and row < axes.shape[0] and col < axes.shape[1]):
+                            axes[row, col].set_visible(False)
+                        elif (isinstance(axes, list) and row < len(axes) and col < len(axes[row])):
+                            axes[row][col].set_visible(False)
                 
-                d_pred_points = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
+                plt.tight_layout()
+                st.pyplot(fig)
                 
-                plot_with_diagnostics(
-                    ax, temp_data['t'], temp_data['d'], d_pred_points,
-                    t_range, d_pred_range, 
-                    title=f'Температура {temp}°C',
-                    ylabel='Диаметр (мкм)',
-                    model_name=f'Модель (n={best_n:.1f})'
-                )
-        
-        # Скрываем пустые subplots
-        for idx in range(len(temps), n_rows * n_cols):
-            row = idx // n_cols
-            col = idx % n_cols
-            if n_rows == 1:
-                axes[col].set_visible(False)
-            else:
-                axes[row, col].set_visible(False)
-        
-        plt.tight_layout()
-        st.pyplot(fig)
-        
-        # Анализ расхождений
-        st.subheader("Анализ расхождений модели и эксперимента")
-        
-        all_actual = []
-        all_predicted = []
-        
-        for temp in temps:
-            temp_data = df_grain10[df_grain10['T'] == temp]
-            k_value = best_k_df[best_k_df['T'] == temp]['K'].iloc[0]
-            d_pred = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
+                # Анализ расхождений
+                st.subheader("Анализ расхождений модели и эксперимента")
+                
+                all_actual = []
+                all_predicted = []
+                all_temperatures = []
+                
+                for temp in temps_with_data:
+                    temp_data = df_grain10[df_grain10['T'] == temp]
+                    temp_k_data = best_k_df[best_k_df['T'] == temp]
+                    
+                    if len(temp_k_data) > 0:
+                        k_value = temp_k_data['K'].iloc[0]
+                        d_pred = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
+                        
+                        all_actual.extend(temp_data['d'])
+                        all_predicted.extend(d_pred)
+                        all_temperatures.extend([temp] * len(temp_data))
+                
+                if len(all_actual) > 0:
+                    # График остатков
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+                    
+                    residuals = np.array(all_actual) - np.array(all_predicted)
+                    
+                    # График 1: Остатки vs предсказания
+                    ax1.scatter(all_predicted, residuals, alpha=0.7)
+                    ax1.axhline(0, color='red', linestyle='--')
+                    ax1.set_xlabel('Предсказанные значения диаметра (мкм)')
+                    ax1.set_ylabel('Остатки (мкм)')
+                    ax1.set_title('Остатки модели диаметров')
+                    ax1.grid(True, alpha=0.3)
+                    
+                    # График 2: Фактические vs предсказанные значения
+                    ax2.scatter(all_actual, all_predicted, alpha=0.7, c=all_temperatures, cmap='viridis')
+                    min_val = min(min(all_actual), min(all_predicted))
+                    max_val = max(max(all_actual), max(all_predicted))
+                    ax2.plot([min_val, max_val], [min_val, max_val], 'r--', label='Идеальное согласие')
+                    ax2.set_xlabel('Фактические диаметры (мкм)')
+                    ax2.set_ylabel('Предсказанные диаметры (мкм)')
+                    ax2.set_title('Фактические vs предсказанные значения')
+                    ax2.legend()
+                    ax2.grid(True, alpha=0.3)
+                    
+                    # Цветовая шкала для температур
+                    plt.colorbar(plt.cm.ScalarMappable(cmap='viridis'), ax=ax2, label='Температура (°C)')
+                    
+                    st.pyplot(fig)
+                    
+                    # Интерпретация результатов
+                    overall_metrics = calculate_comprehensive_metrics(np.array(all_actual), np.array(all_predicted))
+                    st.info(f"""
+                    **Общая статистика модели диаметров:**
+                    - Средний R²: {overall_metrics['R²']:.3f}
+                    - Средняя ошибка (RMSE): {overall_metrics['RMSE']:.2f} мкм
+                    - Средняя абсолютная ошибка: {overall_metrics['MAE']:.2f} мкм
+                    
+                    **Интерпретация:**
+                    {'✅ Хорошее согласие' if overall_metrics['R²'] > 0.9 else '⚠️ Умеренное согласие' if overall_metrics['R²'] > 0.8 else '❌ Требуется улучшение модели'}
+                    """)
             
-            all_actual.extend(temp_data['d'])
-            all_predicted.extend(d_pred)
-        
-        # График остатков
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-        
-        residuals = np.array(all_actual) - np.array(all_predicted)
-        
-        # График 1: Остатки vs предсказания
-        ax1.scatter(all_predicted, residuals, alpha=0.7)
-        ax1.axhline(0, color='red', linestyle='--')
-        ax1.set_xlabel('Предсказанные значения диаметра (мкм)')
-        ax1.set_ylabel('Остатки (мкм)')
-        ax1.set_title('Остатки модели диаметров')
-        ax1.grid(True, alpha=0.3)
-        
-        # График 2: Фактические vs предсказанные значения
-        ax2.scatter(all_actual, all_predicted, alpha=0.7)
-        min_val = min(min(all_actual), min(all_predicted))
-        max_val = max(max(all_actual), max(all_predicted))
-        ax2.plot([min_val, max_val], [min_val, max_val], 'r--', label='Идеальное согласие')
-        ax2.set_xlabel('Фактические диаметры (мкм)')
-        ax2.set_ylabel('Предсказанные диаметры (мкм)')
-        ax2.set_title('Фактические vs предсказанные значения')
-        ax2.legend()
-        ax2.grid(True, alpha=0.3)
-        
-        st.pyplot(fig)
-        
-        # Интерпретация результатов
-        st.info("""
-        **Интерпретация графиков диаметров:**
-        
-        ✅ **Хорошие признаки:**
-        - Точки близко к линии модели
-        - Остатки случайно разбросаны вокруг нуля
-        - R² > 0.9
-        
-        ❌ **Проблемные признаки:**
-        - Систематические отклонения (все точки выше/ниже линии)
-        - Тренд в остатках
-        - R² < 0.8
-        
-        **Если модель плохая:**
-        - Попробуйте другой диапазон n
-        - Проверьте начальный диаметр d₀
-        - Рассмотрите более сложную модель
-        """)
-        
-        # Анализ Аррениуса для диаметров
-        if len(best_k_df) >= 2:
-            st.subheader("Аррениус-анализ для диаметров")
-            
-            x = 1 / best_k_df['T_K']
-            y = np.log(best_k_df['K'])
-            
-            slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
-            
-            Q_diam = -slope * R
-            K0_diam = np.exp(intercept)
-            
-            # Визуализация Аррениуса
-            fig, ax = plt.subplots(figsize=(10, 6))
-            
-            ax.scatter(x, y, s=100, alpha=0.7, label='Экспериментальные точки')
-            x_fit = np.linspace(x.min(), x.max(), 100)
-            y_fit = slope * x_fit + intercept
-            ax.plot(x_fit, y_fit, 'r--', linewidth=2,
-                   label=f'Регрессия: Q = {Q_diam:.0f} Дж/моль\nR² = {r_value**2:.4f}')
-            
-            ax.set_xlabel('1/T (1/K)')
-            ax.set_ylabel('ln(K)')
-            ax.set_title('Аррениус для кинетических коэффициентов диаметров')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-            
-            st.pyplot(fig)
-            
-            st.session_state['diam_params'] = {
-                'n': best_n, 'Q': Q_diam, 'K0': K0_diam, 'd0': initial_diameter,
-                'arrhenius_R2': r_value**2
-            }
+            # Анализ Аррениуса для диаметров
+            if len(best_k_df) >= 2:
+                st.subheader("Аррениус-анализ для диаметров")
+                
+                x = 1 / best_k_df['T_K']
+                y = np.log(best_k_df['K'])
+                
+                slope, intercept, r_value, p_value, std_err = stats.linregress(x, y)
+                
+                Q_diam = -slope * R
+                K0_diam = np.exp(intercept)
+                
+                # Визуализация Аррениуса
+                fig, ax = plt.subplots(figsize=(10, 6))
+                
+                ax.scatter(x, y, s=100, alpha=0.7, label='Экспериментальные точки')
+                x_fit = np.linspace(x.min(), x.max(), 100)
+                y_fit = slope * x_fit + intercept
+                ax.plot(x_fit, y_fit, 'r--', linewidth=2,
+                       label=f'Регрессия: Q = {Q_diam:.0f} Дж/моль\nR² = {r_value**2:.4f}')
+                
+                ax.set_xlabel('1/T (1/K)')
+                ax.set_ylabel('ln(K)')
+                ax.set_title('Аррениус для кинетических коэффициентов диаметров')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                st.pyplot(fig)
+                
+                st.session_state['diam_params'] = {
+                    'n': best_n, 'Q': Q_diam, 'K0': K0_diam, 'd0': initial_diameter,
+                    'arrhenius_R2': r_value**2
+                }
+        else:
+            st.error("❌ Не удалось подобрать параметры модели для любого n")
 
     st.header("3. 📊 Анализ содержания σ-фазы (JMAK-модель)")
     
@@ -373,10 +397,6 @@ if 'grain10_data' in st.session_state:
         - S-образная кривая роста
         - Насыщение при больших временах
         - R² должен быть близок к 1
-        
-        **Типичные значения m:**
-        - m ≈ 1: постоянная скорость зарождения
-        - m ≈ 1.5: диффузионно-контролируемое зарождение
         """)
     
     # JMAK-анализ
@@ -387,15 +407,18 @@ if 'grain10_data' in st.session_state:
         
         if len(temp_data) >= 3:
             try:
+                # Более надежный подбор параметров
+                bounds = ([1e-6, 0.1, 50], [1.0, 3.0, 150])
+                p0 = [0.001, 1.0, 100]
+                
                 popt, pcov = curve_fit(
-                    lambda t, k, m, X_inf: 100 * (1 - np.exp(-(k * t) ** m)),
+                    lambda t, k, m, X_inf: X_inf * (1 - np.exp(-(k * t) ** m)),
                     temp_data['t'], temp_data['f'],
-                    p0=[0.001, 1.0, 100],
-                    bounds=([1e-6, 0.1, 50], [1.0, 3.0, 150])
+                    p0=p0, bounds=bounds, maxfev=5000
                 )
                 
                 k_jmak, m_jmak, X_inf = popt
-                y_pred = 100 * (1 - np.exp(-(k_jmak * temp_data['t']) ** m_jmak))
+                y_pred = X_inf * (1 - np.exp(-(k_jmak * temp_data['t']) ** m_jmak))
                 metrics = calculate_comprehensive_metrics(temp_data['f'], y_pred)
                 
                 jmak_results[temp] = {
@@ -404,85 +427,72 @@ if 'grain10_data' in st.session_state:
                 }
                 
             except Exception as e:
-                st.warning(f"Ошибка подбора JMAK для {temp}°C: {e}")
+                st.write(f"⚠️ Не удалось подобрать JMAK для {temp}°C: {str(e)[:100]}...")
     
     if jmak_results:
         # Визуализация JMAK для всех температур
         st.subheader("Диагностика JMAK-модели по температурам")
         
         temps_jmak = sorted(jmak_results.keys())
-        n_cols_jmak = 2
-        n_rows_jmak = (len(temps_jmak) + n_cols_jmak - 1) // n_cols_jmak
         
-        fig, axes = plt.subplots(n_rows_jmak, n_cols_jmak, figsize=(15, 5*n_rows_jmak))
-        if n_rows_jmak == 1:
-            axes = [axes] if n_cols_jmak == 1 else axes
-        
-        for idx, temp in enumerate(temps_jmak):
-            if idx < n_rows_jmak * n_cols_jmak:
-                row = idx // n_cols_jmak
-                col = idx % n_cols_jmak
-                
-                if n_rows_jmak == 1:
-                    ax = axes[col]
-                else:
-                    ax = axes[row, col]
-                
-                temp_data = df_grain10[df_grain10['T'] == temp]
-                results = jmak_results[temp]
-                
-                # Расчет JMAK-кривой
-                t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max() * 1.2, 100)
-                y_pred_range = 100 * (1 - np.exp(-(results['k'] * t_range) ** results['m']))
-                
-                y_pred_points = 100 * (1 - np.exp(-(results['k'] * temp_data['t']) ** results['m']))
-                
-                plot_with_diagnostics(
-                    ax, temp_data['t'], temp_data['f'], y_pred_points,
-                    t_range, y_pred_range,
-                    title=f'Температура {temp}°C',
-                    ylabel='Содержание σ-фазы (%)',
-                    model_name=f'JMAK (m={results["m"]:.2f})'
-                )
-        
-        plt.tight_layout()
-        st.pyplot(fig)
-        
-        # Анализ качества JMAK
-        st.subheader("Сводка по JMAK-анализу")
-        
-        jmak_summary = []
-        for temp, results in jmak_results.items():
-            jmak_summary.append({
-                'Температура, °C': temp,
-                'k': f"{results['k']:.6f}",
-                'm': f"{results['m']:.2f}",
-                'X∞': f"{results['X_inf']:.1f}%",
-                'R²': f"{results['R2']:.3f}",
-                'RMSE': f"{results['metrics']['RMSE']:.2f}"
-            })
-        
-        st.table(pd.DataFrame(jmak_summary))
-        
-        # Интерпретация JMAK-результатов
-        st.info("""
-        **Интерпретация JMAK-результатов:**
-        
-        ✅ **Хорошие признаки:**
-        - R² > 0.95
-        - m в диапазоне 0.5-2.5
-        - X∞ физически осмыслен (~10-30% для σ-фазы)
-        
-        ❌ **Проблемные признаки:**
-        - R² < 0.8
-        - m < 0.1 или m > 3
-        - X∞ нереалистично высокий/низкий
-        
-        **Если JMAK плохо подходит:**
-        - Проверьте данные на выбросы
-        - Рассмотрите модифицированные JMAK-модели
-        - Возможно, процесс не описывается классической JMAK-кинетикой
-        """)
+        if len(temps_jmak) > 0:
+            n_cols_jmak = 2
+            n_rows_jmak = (len(temps_jmak) + n_cols_jmak - 1) // n_cols_jmak
+            
+            fig, axes = plt.subplots(n_rows_jmak, n_cols_jmak, figsize=(15, 5*n_rows_jmak))
+            if n_rows_jmak == 1:
+                axes = [axes] if n_cols_jmak == 1 else axes
+            
+            for idx, temp in enumerate(temps_jmak):
+                if idx < n_rows_jmak * n_cols_jmak:
+                    row = idx // n_cols_jmak
+                    col = idx % n_cols_jmak
+                    
+                    if n_rows_jmak == 1:
+                        ax = axes[col] if isinstance(axes, list) else axes
+                    else:
+                        if isinstance(axes, np.ndarray):
+                            ax = axes[row, col]
+                        else:
+                            ax = axes[row][col]
+                    
+                    temp_data = df_grain10[df_grain10['T'] == temp]
+                    results = jmak_results[temp]
+                    
+                    # Расчет JMAK-кривой
+                    t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max() * 1.2, 100)
+                    y_pred_range = results['X_inf'] * (1 - np.exp(-(results['k'] * t_range) ** results['m']))
+                    
+                    y_pred_points = results['X_inf'] * (1 - np.exp(-(results['k'] * temp_data['t']) ** results['m']))
+                    
+                    plot_with_diagnostics(
+                        ax, temp_data['t'], temp_data['f'], y_pred_points,
+                        t_range, y_pred_range,
+                        title=f'Температура {temp}°C',
+                        ylabel='Содержание σ-фазы (%)',
+                        model_name=f'JMAK (m={results["m"]:.2f})'
+                    )
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+            # Анализ качества JMAK
+            st.subheader("Сводка по JMAK-анализу")
+            
+            jmak_summary = []
+            for temp, results in jmak_results.items():
+                jmak_summary.append({
+                    'Температура, °C': temp,
+                    'k': f"{results['k']:.6f}",
+                    'm': f"{results['m']:.2f}",
+                    'X∞': f"{results['X_inf']:.1f}%",
+                    'R²': f"{results['R2']:.3f}",
+                    'RMSE': f"{results['metrics']['RMSE']:.2f}"
+                })
+            
+            st.table(pd.DataFrame(jmak_summary))
+        else:
+            st.warning("❌ Нет температур с успешным JMAK-подбором")
 
     st.header("4. 🎯 Обратный расчет температуры")
     
@@ -496,22 +506,33 @@ if 'grain10_data' in st.session_state:
             t_obs = st.number_input("Время эксплуатации t (часы)", value=5000, min_value=1, step=100)
         
         if st.button("Рассчитать температуру по диаметру"):
-            k_obs = (d_obs**params['n'] - params['d0']**params['n']) / t_obs
-            
-            if k_obs > 0:
-                denominator = R * (np.log(params['K0']) - np.log(k_obs))
-                if denominator > 0:
-                    T_K = params['Q'] / denominator
-                    T_C = T_K - 273.15
-                    
-                    st.success(f"**Расчетная температура: {T_C:.1f}°C**")
-                    
-                    # Оценка надежности
-                    st.info(f"""
-                    **Оценка надежности расчета:**
-                    - R² Аррениуса: {params['arrhenius_R2']:.3f}
-                    - Энергия активации: {params['Q']:.0f} Дж/моль
-                    - Показатель n: {params['n']:.1f}
-                    
-                    {'✅ Надежность хорошая' if params['arrhenius_R2'] > 0.9 else '⚠️ Надежность умеренная'}
-                    """)
+            try:
+                k_obs = (d_obs**params['n'] - params['d0']**params['n']) / t_obs
+                
+                if k_obs > 0:
+                    denominator = R * (np.log(params['K0']) - np.log(k_obs))
+                    if denominator > 0:
+                        T_K = params['Q'] / denominator
+                        T_C = T_K - 273.15
+                        
+                        st.success(f"**Расчетная температура: {T_C:.1f}°C**")
+                        
+                        # Оценка надежности
+                        reliability = "✅ Надежность хорошая" if params['arrhenius_R2'] > 0.9 else "⚠️ Надежность умеренная" if params['arrhenius_R2'] > 0.8 else "❌ Надежность низкая"
+                        
+                        st.info(f"""
+                        **Оценка надежности расчета:**
+                        - R² Аррениуса: {params['arrhenius_R2']:.3f}
+                        - Энергия активации: {params['Q']:.0f} Дж/моль
+                        - Показатель n: {params['n']:.1f}
+                        
+                        {reliability}
+                        """)
+                    else:
+                        st.error("❌ Ошибка: отрицательный знаменатель в расчете температуры")
+                else:
+                    st.error("❌ Ошибка: K_obs должен быть положительным")
+            except Exception as e:
+                st.error(f"❌ Ошибка расчета: {e}")
+    else:
+        st.warning("❌ Сначала выполните анализ диаметров для калибровки модели")

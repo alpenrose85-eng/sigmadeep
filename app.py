@@ -18,15 +18,15 @@ grain_df = pd.DataFrame(GRAIN_DATA)
 grain_df['inv_sqrt_a_v'] = 1 / np.sqrt(grain_df['a_v'])
 grain_df['ln_inv_sqrt_a_v'] = np.log(grain_df['inv_sqrt_a_v'])
 
+def calculate_trunin_parameter(T_kelvin, time_hours):
+    """Расчет параметра Трунина: P = T(logτ - 2logT + 26.3)"""
+    return T_kelvin * (np.log10(time_hours) - 2 * np.log10(T_kelvin) + 26.3)
+
 class PhysicsBasedSigmaModel:
     def __init__(self):
         self.models = {}
         self.grain_models = {}
         
-    def calculate_trunin_parameter(self, T_kelvin, time_hours):
-        """Расчет параметра Трунина: P = T(logτ - 2logT + 26.3)"""
-        return T_kelvin * (np.log10(time_hours) - 2 * np.log10(T_kelvin) + 26.3)
-    
     def arrhenius_model(self, t, T, G, A, Q, n, p):
         """Модель на основе уравнения Аррениуса: d = A * t^n * exp(-Q/RT) * f(G)"""
         grain_info = grain_df[grain_df['G'] == G].iloc[0]
@@ -49,7 +49,7 @@ class PhysicsBasedSigmaModel:
         """Обучение физически обоснованных моделей"""
         # Рассчитываем параметр Трунина для всех точек
         T_kelvin = df['T'] + 273.15
-        P_values = self.calculate_trunin_parameter(T_kelvin, df['t'])
+        P_values = calculate_trunin_parameter(T_kelvin, df['t'])
         d_values = df['d'].values
         
         # Модель на основе Аррениуса (глобальная для всех зерен)
@@ -146,7 +146,7 @@ class PhysicsBasedSigmaModel:
                 continue
                 
             T_kelvin = grain_data['T'] + 273.15
-            P_values = self.calculate_trunin_parameter(T_kelvin, grain_data['t'])
+            P_values = calculate_trunin_parameter(T_kelvin, grain_data['t'])
             d_values = grain_data['d'].values
             
             grain_models = {}
@@ -236,7 +236,7 @@ class PhysicsBasedSigmaModel:
             # Для моделей Трунина
             def equation(T_celsius):
                 T_kelvin = T_celsius + 273.15
-                P = self.calculate_trunin_parameter(T_kelvin, time_hours)
+                P = calculate_trunin_parameter(T_kelvin, time_hours)
                 predicted_d = model_info['function'](P, *model_info['params'])
                 return predicted_d - d_sigma
             
@@ -294,7 +294,7 @@ class PhysicsBasedSigmaModel:
             # Модель Трунина для зерна
             def equation(T_celsius):
                 T_kelvin = T_celsius + 273.15
-                P = self.calculate_trunin_parameter(T_kelvin, time_hours)
+                P = calculate_trunin_parameter(T_kelvin, time_hours)
                 predicted_d = model_info['function'](P, *model_info['params'])
                 return predicted_d - d_sigma
             
@@ -385,7 +385,7 @@ def main():
                     df_clean['point_id'] = df_clean.index
                     
                     T_kelvin = df_clean['T'] + 273.15
-                    df_clean['P_trunin'] = self.calculate_trunin_parameter(T_kelvin, df_clean['t'])
+                    df_clean['P_trunin'] = calculate_trunin_parameter(T_kelvin, df_clean['t'])
                     
                     # Управление данными
                     st.subheader("1. Управление данными")
@@ -609,7 +609,7 @@ def main():
                     with st.expander("🔍 Физическая интерпретация"):
                         st.write(f"**Параметр Трунина для рассчитанных условий:**")
                         T_kelvin = temperature + 273.15
-                        P = model.calculate_trunin_parameter(T_kelvin, time_hours)
+                        P = calculate_trunin_parameter(T_kelvin, time_hours)
                         st.write(f"P = {P:.0f}")
                         
                         if training_data is not None:
@@ -628,3 +628,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

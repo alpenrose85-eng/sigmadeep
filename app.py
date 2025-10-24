@@ -18,6 +18,7 @@ st.title("🔬 Комплексный анализ кинетики σ-фазы 
 st.markdown("""
 **Улучшенный анализ с универсальными моделями:**
 - Модели, работающие для всех температур одновременно
+- Учет минимальной температуры начала превращения (550°C)
 - Интерактивный калькулятор для прогнозирования
 - Аррениусовская зависимость констант скорости
 """)
@@ -30,7 +31,7 @@ uploaded_file = st.file_uploader("Загрузите файл с данными 
 
 # Параметры анализа
 st.subheader("Параметры анализа:")
-col1, col2 = st.columns(2)
+col1, col2, col3 = st.columns(3)
 with col1:
     initial_diameter = st.number_input("Начальный диаметр d₀ (мкм)", 
                                      value=0.1, min_value=0.0, step=0.1,
@@ -39,8 +40,12 @@ with col2:
     enable_phase_analysis = st.checkbox("Включить анализ содержания фазы (JMAK)", 
                                       value=True, 
                                       help="Анализ кинетики фазового превращения по содержанию σ-фазы")
+with col3:
+    min_temperature = st.number_input("Минимальная температура начала превращения (°C)", 
+                                    value=550.0, min_value=0.0, step=10.0,
+                                    help="Температура, ниже которой превращение не происходит")
 
-target_grain = 8
+target_grain = 10
 
 # Функции для расчета метрик качества
 def calculate_comprehensive_metrics(y_true, y_pred):
@@ -157,31 +162,48 @@ def calculate_jmak_predictions(time, k, n):
     """Расчет предсказаний JMAK модели"""
     return jmak_model(time, k, n) * 100
 
-# НОВЫЕ ФУНКЦИИ ДЛЯ УНИВЕРСАЛЬНОЙ МОДЕЛИ
+# НОВЫЕ ФУНКЦИИ ДЛЯ УНИВЕРСАЛЬНОЙ МОДЕЛИ С УЧЕТОМ МИНИМАЛЬНОЙ ТЕМПЕРАТУРЫ
 def arrhenius_model(T, A, Ea):
     """Аррениусовская модель: k = A * exp(-Ea/(R*T))"""
     return A * np.exp(-Ea / (R * T))
 
-def universal_diameter_model(t, T, A, Ea, n, d0):
-    """Универсальная модель для диаметра с аррениусовской зависимостью"""
-    k = arrhenius_model(T + 273.15, A, Ea)  # T в Кельвинах
-    return (k * t + d0**n)**(1/n)
+def effective_rate_constant(T, A, Ea, T_min):
+    """Эффективная константа скорости с учетом минимальной температуры"""
+    T_kelvin = T + 273.15  # Перевод в Кельвины
+    T_min_kelvin = T_min + 273.15
+    
+    if T_kelvin <= T_min_kelvin:
+        return 0.0  # Ниже минимальной температуры процесс не идет
+    else:
+        return arrhenius_model(T_kelvin, A, Ea)
 
-def universal_phase_model(t, T, A, Ea, n_jmak):
-    """Универсальная модель для содержания фазы с аррениусовской зависимостью"""
-    k = arrhenius_model(T + 273.15, A, Ea)
-    return jmak_model(t, k, n_jmak) * 100
+def universal_diameter_model(t, T, A, Ea, n, d0, T_min):
+    """Универсальная модель для диаметра с учетом минимальной температуры"""
+    k_eff = effective_rate_constant(T, A, Ea, T_min)
+    return (k_eff * t + d0**n)**(1/n)
 
-def fit_universal_diameter_model(df, best_n, d0):
-    """Подбор параметров универсальной модели для диаметра"""
+def universal_phase_model(t, T, A, Ea, n_jmak, T_min):
+    """Универсальная модель для содержания фазы с учетом минимальной температуры"""
+    k_eff = effective_rate_constant(T, A, Ea, T_min)
+    return jmak_model(t, k_eff, n_jmak) * 100
+
+def fit_universal_diameter_model(df, best_n, d0, T_min):
+    """Подбор параметров универсальной модели для диаметра с учетом минимальной температуры"""
     try:
+        # Фильтруем данные выше минимальной температуры
+        df_filtered = df[df['T'] >= T_min].copy()
+        
+        if len(df_filtered) == 0:
+            st.warning("❌ Нет данных выше минимальной температуры для подбора модели")
+            return None, None
+        
         # Собираем все данные
         t_all = []
         T_all = []
         d_all = []
         
-        for temp in df['T'].unique():
-            temp_data = df[df['T'] == temp]
+        for temp in df_filtered['T'].unique():
+            temp_data = df_filtered[df_filtered['T'] == temp]
             t_all.extend(temp_data['t'].values)
             T_all.extend([temp] * len(temp_data))
             d_all.extend(temp_data['d'].values)
@@ -196,7 +218,7 @@ def fit_universal_diameter_model(df, best_n, d0):
         
         # Подгонка
         popt, pcov = curve_fit(
-            lambda x, A, Ea: universal_diameter_model(x[0], x[1], A, Ea, best_n, d0),
+            lambda x, A, Ea: universal_diameter_model(x[0], x[1], A, Ea, best_n, d0, T_min),
             [t_all, T_all], d_all,
             p0=[A_guess, Ea_guess],
             bounds=([1e-10, 10000], [1e10, 1000000]),
@@ -208,15 +230,22 @@ def fit_universal_diameter_model(df, best_n, d0):
         st.error(f"Ошибка подбора универсальной модели диаметра: {e}")
         return None, None
 
-def fit_universal_phase_model(df):
-    """Подбор параметров универсальной модели для содержания фазы"""
+def fit_universal_phase_model(df, T_min):
+    """Подбор параметров универсальной модели для содержания фазы с учетом минимальной температуры"""
     try:
+        # Фильтруем данные выше минимальной температуры
+        df_filtered = df[df['T'] >= T_min].copy()
+        
+        if len(df_filtered) == 0:
+            st.warning("❌ Нет данных выше минимальной температуры для подбора JMAK-модели")
+            return None, None
+        
         t_all = []
         T_all = []
         f_all = []
         
-        for temp in df['T'].unique():
-            temp_data = df[df['T'] == temp]
+        for temp in df_filtered['T'].unique():
+            temp_data = df_filtered[df_filtered['T'] == temp]
             t_all.extend(temp_data['t'].values)
             T_all.extend([temp] * len(temp_data))
             f_all.extend(temp_data['f'].values)
@@ -232,7 +261,7 @@ def fit_universal_phase_model(df):
         
         # Подгонка
         popt, pcov = curve_fit(
-            lambda x, A, Ea, n: universal_phase_model(x[0], x[1], A, Ea, n),
+            lambda x, A, Ea, n: universal_phase_model(x[0], x[1], A, Ea, n, T_min),
             [t_all, T_all], f_all,
             p0=[A_guess, Ea_guess, n_guess],
             bounds=([1e-10, 10000, 0.1], [1e10, 1000000, 4]),
@@ -259,6 +288,12 @@ if uploaded_file is not None:
             if len(df_grain10) > 0:
                 st.session_state['grain10_data'] = df_grain10
                 st.success(f"✅ Данные для зерна №10 успешно загружены!")
+                
+                # Проверка минимальной температуры в данных
+                min_temp_in_data = df_grain10['T'].min()
+                if min_temp_in_data < min_temperature:
+                    st.warning(f"⚠️ В данных есть температуры ниже минимальной ({min_temp_in_data}°C < {min_temperature}°C)")
+                    st.info("Эти точки будут исключены из подбора универсальной модели")
                 
                 st.subheader("📊 Статистика данных для зерна №10:")
                 col1, col2, col3, col4 = st.columns(4)
@@ -298,8 +333,6 @@ if 'grain10_data' in st.session_state:
     # Анализ диаметров (существующий код)
     st.header("2. 📏 Анализ диаметров σ-фазы")
     
-    # ... [существующий код анализа диаметров] ...
-    
     # Подбор показателя степени n (существующий код)
     n_min, n_max, n_step = 3.0, 5.0, 0.1
     n_candidates = np.arange(n_min, n_max + n_step, n_step)
@@ -311,6 +344,10 @@ if 'grain10_data' in st.session_state:
         k_values = []
         
         for temp in df_grain10['T'].unique():
+            # Пропускаем температуры ниже минимальной
+            if temp < min_temperature:
+                continue
+                
             temp_data = df_grain10[df_grain10['T'] == temp]
             
             if len(temp_data) >= 2:
@@ -367,33 +404,36 @@ if 'grain10_data' in st.session_state:
             
             st.success(f"🎯 Оптимальный показатель: n = {best_n:.1f} (R² = {best_n_row['Средний R²']:.3f})")
 
-    # НОВЫЙ РАЗДЕЛ: УНИВЕРСАЛЬНАЯ МОДЕЛЬ И КАЛЬКУЛЯТОР
+    # НОВЫЙ РАЗДЕЛ: УНИВЕРСАЛЬНАЯ МОДЕЛЬ И КАЛЬКУЛЯТОР С УЧЕТОМ МИНИМАЛЬНОЙ ТЕМПЕРАТУРЫ
     st.header("3. 🔬 Универсальная модель для всех температур")
+    
+    st.info(f"**Минимальная температура начала превращения:** {min_temperature}°C")
     
     if best_n is not None:
         # Подбор универсальной модели для диаметра
         st.subheader("Универсальная модель роста диаметра")
         
         with st.expander("💡 Объяснение универсальной модели"):
-            st.markdown("""
+            st.markdown(f"""
             **Универсальная модель диаметра:**
-            $$ d(t,T) = \\left[ A \\cdot \\exp\\left(-\\frac{E_a}{RT}\\right) \\cdot t + d_0^n \\right]^{1/n} $$
+            $$ d(t,T) = \\left[ k_{{eff}}(T) \\cdot t + d_0^n \\right]^{{1/n}} $$
+            
+            $$ k_{{eff}}(T) = \\begin{{cases}}
+            A \\cdot \\exp\\left(-\\frac{{E_a}}{{RT}}\\right) & \\text{{если }} T \\geq {min_temperature}°C \\\\
+            0 & \\text{{если }} T < {min_temperature}°C
+            \\end{{cases}} $$
             
             **Параметры:**
             - **A** - предэкспоненциальный множитель
             - **Ea** - энергия активации (Дж/моль)
             - **n** - показатель степени (фиксированный)
             - **d₀** - начальный диаметр (фиксированный)
-            
-            **Преимущества:**
-            - Работает для всех температур одновременно
-            - Учитывает температурную зависимость
-            - Позволяет прогнозировать для любых условий
+            - **T_min** = {min_temperature}°C - минимальная температура начала превращения
             """)
         
         # Подбор параметров универсальной модели
         universal_diameter_params, universal_diameter_cov = fit_universal_diameter_model(
-            df_grain10, best_n, initial_diameter
+            df_grain10, best_n, initial_diameter, min_temperature
         )
         
         if universal_diameter_params is not None:
@@ -406,6 +446,7 @@ if 'grain10_data' in st.session_state:
             - Энергия активации Ea = {Ea_diam:.0f} Дж/моль ({Ea_diam/1000:.1f} кДж/моль)
             - Показатель степени n = {best_n:.1f}
             - Начальный диаметр d₀ = {initial_diameter} мкм
+            - Минимальная температура = {min_temperature}°C
             """)
             
             # Визуализация универсальной модели
@@ -423,39 +464,49 @@ if 'grain10_data' in st.session_state:
                 T_temp = np.array([temp] * len(t_temp))
                 
                 # Предсказания универсальной модели
-                d_pred_universal = universal_diameter_model(t_temp, T_temp, A_diam, Ea_diam, best_n, initial_diameter)
+                d_pred_universal = universal_diameter_model(t_temp, T_temp, A_diam, Ea_diam, best_n, initial_diameter, min_temperature)
+                
+                color = 'red' if temp < min_temperature else 'blue'
+                marker = 'x' if temp < min_temperature else 'o'
+                label_suffix = " (ниже T_min)" if temp < min_temperature else ""
                 
                 axes[0].scatter(temp_data['t'], temp_data['d'], alpha=0.7, 
-                               label=f'{temp}°C (эксп.)', s=50)
-                axes[0].plot(temp_data['t'], d_pred_universal, '--', 
-                            label=f'{temp}°C (мод.)', linewidth=2)
+                               color=color, marker=marker, s=50,
+                               label=f'{temp}°C{label_suffix}')
+                if temp >= min_temperature:
+                    axes[0].plot(temp_data['t'], d_pred_universal, '--', 
+                                color=color, linewidth=2)
                 
                 all_predictions_diam.extend(d_pred_universal)
                 all_actual_diam.extend(temp_data['d'].values)
             
+            axes[0].axhline(initial_diameter, color='gray', linestyle=':', alpha=0.7, label=f'Начальный диаметр {initial_diameter} мкм')
             axes[0].set_xlabel('Время (часы)')
             axes[0].set_ylabel('Диаметр (мкм)')
-            axes[0].set_title('Универсальная модель диаметра\nдля всех температур')
+            axes[0].set_title(f'Универсальная модель диаметра\nT_min = {min_temperature}°C')
             axes[0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             axes[0].grid(True, alpha=0.3)
             
-            # График 2: Качество предсказаний
-            axes[1].scatter(all_actual_diam, all_predictions_diam, alpha=0.6)
-            min_val = min(min(all_actual_diam), min(all_predictions_diam))
-            max_val = max(max(all_actual_diam), max(all_predictions_diam))
-            axes[1].plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
-            axes[1].set_xlabel('Фактические диаметры (мкм)')
-            axes[1].set_ylabel('Предсказанные диаметры (мкм)')
-            axes[1].set_title('Качество универсальной модели диаметра')
-            axes[1].grid(True, alpha=0.3)
+            # График 2: Качество предсказаний (только для температур выше T_min)
+            valid_mask = np.array([T >= min_temperature for T in df_grain10['T'].values])
+            valid_actual = np.array(all_actual_diam)[valid_mask]
+            valid_predictions = np.array(all_predictions_diam)[valid_mask]
             
-            # Метрики качества
-            metrics_universal_diam = calculate_comprehensive_metrics(
-                np.array(all_actual_diam), np.array(all_predictions_diam)
-            )
-            axes[1].text(0.05, 0.95, f"R² = {metrics_universal_diam['R²']:.3f}\nRMSE = {metrics_universal_diam['RMSE']:.2f}", 
-                        transform=axes[1].transAxes, verticalalignment='top',
-                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            if len(valid_actual) > 0:
+                axes[1].scatter(valid_actual, valid_predictions, alpha=0.6, color='blue')
+                min_val = min(min(valid_actual), min(valid_predictions))
+                max_val = max(max(valid_actual), max(valid_predictions))
+                axes[1].plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
+                axes[1].set_xlabel('Фактические диаметры (мкм)')
+                axes[1].set_ylabel('Предсказанные диаметры (мкм)')
+                axes[1].set_title('Качество универсальной модели диаметра\n(только T ≥ T_min)')
+                axes[1].grid(True, alpha=0.3)
+                
+                # Метрики качества (только для валидных температур)
+                metrics_universal_diam = calculate_comprehensive_metrics(valid_actual, valid_predictions)
+                axes[1].text(0.05, 0.95, f"R² = {metrics_universal_diam['R²']:.3f}\nRMSE = {metrics_universal_diam['RMSE']:.2f}", 
+                            transform=axes[1].transAxes, verticalalignment='top',
+                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
             
             plt.tight_layout()
             st.pyplot(fig)
@@ -464,7 +515,7 @@ if 'grain10_data' in st.session_state:
     if enable_phase_analysis:
         st.subheader("Универсальная модель содержания фазы (JMAK)")
         
-        universal_phase_params, universal_phase_cov = fit_universal_phase_model(df_grain10)
+        universal_phase_params, universal_phase_cov = fit_universal_phase_model(df_grain10, min_temperature)
         
         if universal_phase_params is not None:
             A_phase, Ea_phase, n_phase = universal_phase_params
@@ -475,6 +526,7 @@ if 'grain10_data' in st.session_state:
             - Предэкспоненциальный множитель A = {A_phase:.4e}
             - Энергия активации Ea = {Ea_phase:.0f} Дж/моль ({Ea_phase/1000:.1f} кДж/моль)
             - Показатель Аврами n = {n_phase:.2f}
+            - Минимальная температура = {min_temperature}°C
             """)
             
             # Визуализация универсальной модели фазы
@@ -489,48 +541,59 @@ if 'grain10_data' in st.session_state:
                     t_temp = temp_data['t'].values
                     T_temp = np.array([temp] * len(t_temp))
                     
-                    f_pred_universal = universal_phase_model(t_temp, T_temp, A_phase, Ea_phase, n_phase)
+                    f_pred_universal = universal_phase_model(t_temp, T_temp, A_phase, Ea_phase, n_phase, min_temperature)
+                    
+                    color = 'red' if temp < min_temperature else 'blue'
+                    marker = 'x' if temp < min_temperature else 'o'
+                    label_suffix = " (ниже T_min)" if temp < min_temperature else ""
                     
                     axes[0].scatter(temp_data['t'], temp_data['f'], alpha=0.7, 
-                                   label=f'{temp}°C (эксп.)', s=50)
-                    axes[0].plot(temp_data['t'], f_pred_universal, '--', 
-                                label=f'{temp}°C (мод.)', linewidth=2)
+                                   color=color, marker=marker, s=50,
+                                   label=f'{temp}°C{label_suffix}')
+                    if temp >= min_temperature:
+                        axes[0].plot(temp_data['t'], f_pred_universal, '--', 
+                                    color=color, linewidth=2)
                     
                     all_predictions_phase.extend(f_pred_universal)
                     all_actual_phase.extend(temp_data['f'].values)
             
             axes[0].set_xlabel('Время (часы)')
             axes[0].set_ylabel('Содержание фазы (%)')
-            axes[0].set_title('Универсальная модель содержания фазы\nдля всех температур')
+            axes[0].set_title(f'Универсальная модель содержания фазы\nT_min = {min_temperature}°C')
             axes[0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             axes[0].grid(True, alpha=0.3)
             
-            # График качества
-            axes[1].scatter(all_actual_phase, all_predictions_phase, alpha=0.6)
-            axes[1].plot([0, 100], [0, 100], 'r--', linewidth=2)
-            axes[1].set_xlabel('Фактическое содержание фазы (%)')
-            axes[1].set_ylabel('Предсказанное содержание фазы (%)')
-            axes[1].set_title('Качество универсальной модели фазы')
-            axes[1].grid(True, alpha=0.3)
+            # График качества (только для температур выше T_min)
+            valid_mask_phase = np.array([T >= min_temperature for T in df_grain10['T'].values])
+            valid_actual_phase = np.array(all_actual_phase)[valid_mask_phase]
+            valid_predictions_phase = np.array(all_predictions_phase)[valid_mask_phase]
             
-            metrics_universal_phase = calculate_comprehensive_metrics(
-                np.array(all_actual_phase), np.array(all_predictions_phase)
-            )
-            axes[1].text(0.05, 0.95, f"R² = {metrics_universal_phase['R²']:.3f}\nRMSE = {metrics_universal_phase['RMSE']:.2f}", 
-                        transform=axes[1].transAxes, verticalalignment='top',
-                        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+            if len(valid_actual_phase) > 0:
+                axes[1].scatter(valid_actual_phase, valid_predictions_phase, alpha=0.6, color='blue')
+                axes[1].plot([0, 100], [0, 100], 'r--', linewidth=2)
+                axes[1].set_xlabel('Фактическое содержание фазы (%)')
+                axes[1].set_ylabel('Предсказанное содержание фазы (%)')
+                axes[1].set_title('Качество универсальной модели фазы\n(только T ≥ T_min)')
+                axes[1].grid(True, alpha=0.3)
+                
+                metrics_universal_phase = calculate_comprehensive_metrics(
+                    valid_actual_phase, valid_predictions_phase
+                )
+                axes[1].text(0.05, 0.95, f"R² = {metrics_universal_phase['R²']:.3f}\nRMSE = {metrics_universal_phase['RMSE']:.2f}", 
+                            transform=axes[1].transAxes, verticalalignment='top',
+                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
             
             plt.tight_layout()
             st.pyplot(fig)
 
-    # НОВЫЙ РАЗДЕЛ: КАЛЬКУЛЯТОР
+    # КАЛЬКУЛЯТОР С УЧЕТОМ МИНИМАЛЬНОЙ ТЕМПЕРАТУРЫ
     st.header("4. 🧮 Калькулятор прогнозирования")
     
-    st.markdown("""
+    st.markdown(f"""
     **Используйте рассчитанные универсальные модели для прогнозирования:**
-    - Рассчитайте диаметр или содержание фазы для заданных условий
-    - Определите температуру для достижения целевых значений
-    - Оптимизируйте технологические параметры
+    - Учет минимальной температуры начала превращения: **{min_temperature}°C**
+    - При температурах ниже {min_temperature}°C процесс не происходит
+    - Диаметр остается начальным, содержание фазы = 0%
     """)
     
     calc_type = st.radio("Тип расчета:", 
@@ -546,19 +609,29 @@ if 'grain10_data' in st.session_state:
             calc_mode = st.selectbox("Рассчитать:", ["Диаметр", "Содержание фазы", "Оба параметра"])
         
         if st.button("Рассчитать"):
-            if calc_mode in ["Диаметр", "Оба параметра"] and universal_diameter_params is not None:
-                A_diam, Ea_diam = universal_diameter_params
-                predicted_diameter = universal_diameter_model(
-                    target_time, target_temp, A_diam, Ea_diam, best_n, initial_diameter
-                )
-                st.success(f"**Прогнозируемый диаметр:** {predicted_diameter:.2f} мкм")
-            
-            if calc_mode in ["Содержание фазы", "Оба параметра"] and universal_phase_params is not None:
-                A_phase, Ea_phase, n_phase = universal_phase_params
-                predicted_phase = universal_phase_model(
-                    target_time, target_temp, A_phase, Ea_phase, n_phase
-                )
-                st.success(f"**Прогнозируемое содержание фазы:** {predicted_phase:.1f}%")
+            if target_temp < min_temperature:
+                st.warning(f"⚠️ Температура {target_temp}°C ниже минимальной {min_temperature}°C")
+                st.info(f"**При {target_temp}°C процесс не происходит:**")
+                if calc_mode in ["Диаметр", "Оба параметра"]:
+                    st.success(f"**Диаметр:** {initial_diameter} мкм (начальное значение)")
+                if calc_mode in ["Содержание фазы", "Оба параметра"]:
+                    st.success(f"**Содержание фазы:** 0%")
+            else:
+                st.success(f"✅ Температура {target_temp}°C выше минимальной {min_temperature}°C - процесс идет")
+                
+                if calc_mode in ["Диаметр", "Оба параметра"] and universal_diameter_params is not None:
+                    A_diam, Ea_diam = universal_diameter_params
+                    predicted_diameter = universal_diameter_model(
+                        target_time, target_temp, A_diam, Ea_diam, best_n, initial_diameter, min_temperature
+                    )
+                    st.success(f"**Прогнозируемый диаметр:** {predicted_diameter:.2f} мкм")
+                
+                if calc_mode in ["Содержание фазы", "Оба параметра"] and universal_phase_params is not None:
+                    A_phase, Ea_phase, n_phase = universal_phase_params
+                    predicted_phase = universal_phase_model(
+                        target_time, target_temp, A_phase, Ea_phase, n_phase, min_temperature
+                    )
+                    st.success(f"**Прогнозируемое содержание фазы:** {predicted_phase:.1f}%")
     
     else:  # Определение температуры
         col1, col2, col3 = st.columns(3)
@@ -570,16 +643,18 @@ if 'grain10_data' in st.session_state:
             temp_mode = st.selectbox("Тип целевого значения:", ["Диаметр (мкм)", "Содержание фазы (%)"])
         
         if st.button("Найти температуру"):
+            # Минимальная температура для поиска - не ниже установленной минимальной
+            search_min = max(400, min_temperature)
+            
             if temp_mode == "Диаметр (мкм)" and universal_diameter_params is not None:
-                # Решаем уравнение для температуры
                 A_diam, Ea_diam = universal_diameter_params
                 
                 def equation(T):
-                    k = arrhenius_model(T + 273.15, A_diam, Ea_diam)
+                    k = effective_rate_constant(T, A_diam, Ea_diam, min_temperature)
                     return (k * target_time_temp + initial_diameter**best_n)**(1/best_n) - target_value
                 
-                # Ищем температуру в разумном диапазоне
-                T_candidates = np.linspace(400, 1200, 1000)
+                # Ищем температуру в диапазоне от минимальной до 1200°C
+                T_candidates = np.linspace(search_min, 1200, 1000)
                 differences = [equation(T) for T in T_candidates]
                 
                 # Находим температуру, где разница ближе всего к нулю
@@ -596,10 +671,10 @@ if 'grain10_data' in st.session_state:
                 A_phase, Ea_phase, n_phase = universal_phase_params
                 
                 def equation_phase(T):
-                    k = arrhenius_model(T + 273.15, A_phase, Ea_phase)
+                    k = effective_rate_constant(T, A_phase, Ea_phase, min_temperature)
                     return jmak_model(target_time_temp, k, n_phase) * 100 - target_value
                 
-                T_candidates = np.linspace(400, 1200, 1000)
+                T_candidates = np.linspace(search_min, 1200, 1000)
                 differences = [equation_phase(T) for T in T_candidates]
                 
                 idx_min = np.argmin(np.abs(differences))
@@ -614,25 +689,26 @@ if 'grain10_data' in st.session_state:
     # Визуализация температурных зависимостей
     st.header("5. 📈 Температурные зависимости")
     
-    if universal_diameter_params is not None:
+    if universal_diameter_params is not None or universal_phase_params is not None:
         st.subheader("Зависимость константы скорости от температуры")
         
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
         # График в координатах Аррениуса
-        T_range_kelvin = np.linspace(273 + 400, 273 + 1200, 100)
-        T_range_celsius = T_range_kelvin - 273
+        T_range_celsius = np.linspace(min_temperature - 50, 1200, 200)
+        T_range_kelvin = T_range_celsius + 273
         
         if universal_diameter_params is not None:
             A_diam, Ea_diam = universal_diameter_params
-            k_diam = arrhenius_model(T_range_kelvin, A_diam, Ea_diam)
+            k_diam = [effective_rate_constant(T, A_diam, Ea_diam, min_temperature) for T in T_range_celsius]
             ax1.semilogy(1000/T_range_kelvin, k_diam, 'b-', linewidth=2, label='Диаметр')
         
         if universal_phase_params is not None:
             A_phase, Ea_phase, n_phase = universal_phase_params
-            k_phase = arrhenius_model(T_range_kelvin, A_phase, Ea_phase)
+            k_phase = [effective_rate_constant(T, A_phase, Ea_phase, min_temperature) for T in T_range_celsius]
             ax1.semilogy(1000/T_range_kelvin, k_phase, 'r-', linewidth=2, label='Содержание фазы')
         
+        ax1.axvline(1000/(min_temperature + 273), color='gray', linestyle='--', alpha=0.7, label=f'T_min = {min_temperature}°C')
         ax1.set_xlabel('1000/T (K⁻¹)')
         ax1.set_ylabel('Константа скорости k')
         ax1.set_title('Координаты Аррениуса')
@@ -645,6 +721,7 @@ if 'grain10_data' in st.session_state:
         if universal_phase_params is not None:
             ax2.plot(T_range_celsius, k_phase, 'r-', linewidth=2, label='Содержание фазы')
         
+        ax2.axvline(min_temperature, color='gray', linestyle='--', alpha=0.7, label=f'T_min = {min_temperature}°C')
         ax2.set_xlabel('Температура (°C)')
         ax2.set_ylabel('Константа скорости k')
         ax2.set_title('Температурная зависимость')
@@ -656,19 +733,20 @@ if 'grain10_data' in st.session_state:
 
 st.header("🎯 Рекомендации по использованию моделей")
 
-st.markdown("""
-**Универсальные модели позволяют:**
+st.markdown(f"""
+**Универсальные модели с учетом минимальной температуры ({min_temperature}°C) позволяют:**
 
-1. **Прогнозировать** поведение системы для любых температур и времен
-2. **Оптимизировать** технологические параметры
-3. **Сравнивать** кинетику разных процессов
+1. **Точнее прогнозировать** поведение системы с учетом физических ограничений
+2. **Избегать нефизических предсказаний** при низких температурах
+3. **Оптимизировать** технологические параметры с учетом пороговой температуры
 
-**Для точных прогнозов:**
-- Убедитесь, что целевые параметры находятся в диапазоне экспериментальных данных
-- Проверьте физическую осмысленность результатов
-- Учитывайте ограничения моделей за пределами экспериментального диапазона
+**Ключевые особенности:**
+- При T < {min_temperature}°C: процесс не идет, диаметр = d₀, содержание фазы = 0%
+- При T ≥ {min_temperature}°C: процесс описывается аррениусовской зависимостью
+- Все предсказания физически осмысленны
 
-**Энергии активации:**
-- Типичные значения для диффузионных процессов: 100-300 кДж/моль
-- Сравнение Ea для диаметра и содержания фазы может выявить разные лимитирующие стадии
+**Для промышленного применения:**
+- Используйте калькулятор для определения оптимальных режимов термообработки
+- Учитывайте минимальную температуру при планировании технологических процессов
+- Проверяйте предсказания вблизи граничных условий
 """)

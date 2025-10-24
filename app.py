@@ -40,7 +40,7 @@ with col2:
                                       value=True, 
                                       help="Анализ кинетики фазового превращения по содержанию σ-фазы")
 
-target_grain = 10
+target_grain = 9
 
 # Функции для расчета метрик качества
 def calculate_comprehensive_metrics(y_true, y_pred):

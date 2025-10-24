@@ -52,6 +52,22 @@ with col4:
 
 target_grain = 10
 
+# Инициализация session_state для калькулятора
+if 'calc_type' not in st.session_state:
+    st.session_state.calc_type = "Прогноз диаметра/содержания"
+if 'target_time' not in st.session_state:
+    st.session_state.target_time = 100.0
+if 'target_temp' not in st.session_state:
+    st.session_state.target_temp = 800.0
+if 'calc_mode' not in st.session_state:
+    st.session_state.calc_mode = "Диаметр"
+if 'target_time_temp' not in st.session_state:
+    st.session_state.target_time_temp = 100.0
+if 'target_value' not in st.session_state:
+    st.session_state.target_value = 2.0
+if 'temp_mode' not in st.session_state:
+    st.session_state.temp_mode = "Диаметр (мкм)"
+
 # Функции для расчета метрик качества
 def calculate_comprehensive_metrics(y_true, y_pred):
     """Расчет комплексных метрик качества модели"""
@@ -167,7 +183,7 @@ def calculate_jmak_predictions(time, k, n):
     """Расчет предсказаний JMAK модели"""
     return jmak_model(time, k, n) * 100
 
-# ИСПРАВЛЕННЫЕ ФУНКЦИИ ДЛЯ УНИВЕРСАЛЬНОЙ МОДЕЛИ
+# ФУНКЦИИ ДЛЯ УНИВЕРСАЛЬНОЙ МОДЕЛИ
 def arrhenius_model(T, A, Ea):
     """Аррениусовская модель: k = A * exp(-Ea/(R*T))"""
     return A * np.exp(-Ea / (R * T))
@@ -187,18 +203,12 @@ def effective_rate_constant_single(T, A, Ea, T_min, T_diss):
 
 def effective_rate_constant_array(T_array, A, Ea, T_min, T_diss):
     """Эффективная константа скорости для массива температур"""
-    # Векторизованная версия для работы с массивами
     T_kelvin = T_array + 273.15
     T_min_kelvin = T_min + 273.15
     T_diss_kelvin = T_diss + 273.15
     
-    # Создаем массив результатов
     k_eff = np.zeros_like(T_kelvin)
-    
-    # Маска для рабочего диапазона
     valid_mask = (T_kelvin > T_min_kelvin) & (T_kelvin < T_diss_kelvin)
-    
-    # Вычисляем константы скорости только для валидных температур
     k_eff[valid_mask] = arrhenius_model(T_kelvin[valid_mask], A, Ea)
     
     return k_eff
@@ -227,28 +237,23 @@ def universal_phase_model_array(t_array, T_array, A, Ea, n_jmak, T_min, T_diss):
 def fit_universal_diameter_model(df, best_n, d0, T_min, T_diss):
     """Подбор параметров универсальной модели для диаметра"""
     try:
-        # Фильтруем данные в рабочем диапазоне температур
         df_filtered = df[(df['T'] >= T_min) & (df['T'] <= T_diss)].copy()
         
         if len(df_filtered) < 3:
             st.warning(f"❌ Недостаточно данных в рабочем диапазоне ({len(df_filtered)} точек)")
             return None, None
         
-        # Собираем все данные
         t_all = df_filtered['t'].values
         T_all = df_filtered['T'].values
         d_all = df_filtered['d'].values
         
-        # Начальные приближения
         A_guess = 0.1
-        Ea_guess = 150000  # 150 кДж/моль
+        Ea_guess = 150000
         
-        # Функция для подгонки - принимает массивы
         def model_function(params, t_data, T_data):
             A, Ea = params
             return universal_diameter_model_array(t_data, T_data, A, Ea, best_n, d0, T_min, T_diss)
         
-        # Подгонка с использованием curve_fit
         popt, pcov = curve_fit(
             lambda x, A, Ea: model_function([A, Ea], x[0], x[1]),
             [t_all, T_all], d_all,
@@ -266,7 +271,6 @@ def fit_universal_diameter_model(df, best_n, d0, T_min, T_diss):
 def fit_universal_phase_model(df, T_min, T_diss):
     """Подбор параметров универсальной модели для содержания фазы"""
     try:
-        # Фильтруем данные в рабочем диапазоне температур
         df_filtered = df[(df['T'] >= T_min) & (df['T'] <= T_diss)].copy()
         
         if len(df_filtered) < 3:
@@ -277,17 +281,14 @@ def fit_universal_phase_model(df, T_min, T_diss):
         T_all = df_filtered['T'].values
         f_all = df_filtered['f'].values
         
-        # Начальные приближения
         A_guess = 0.1
         Ea_guess = 150000
         n_guess = 1.5
         
-        # Функция для подгонки
         def model_function(params, t_data, T_data):
             A, Ea, n = params
             return universal_phase_model_array(t_data, T_data, A, Ea, n, T_min, T_diss)
         
-        # Подгонка
         popt, pcov = curve_fit(
             lambda x, A, Ea, n: model_function([A, Ea, n], x[0], x[1]),
             [t_all, T_all], f_all,
@@ -371,7 +372,27 @@ if 'grain10_data' in st.session_state:
     # Анализ диаметров
     st.header("2. 📏 Анализ диаметров σ-фазы")
     
+    with st.expander("💡 Объяснение анализа диаметров"):
+        st.markdown("""
+        **Что анализируем:** Рост среднего диаметра частиц σ-фазы во времени
+        
+        **Физическая модель:** 
+        $$ d^n - d_0^n = K \\cdot t $$
+        
+        **Ожидаемое поведение:**
+        - При правильном n график $d^n - d_0^n$ vs t должен быть линейным
+        - Качество оценивается по R² близкому к 1
+        - Остатки должны быть случайными (без тренда)
+        
+        **Как оценивать результат:**
+        - R² > 0.95 - отличное согласие
+        - R² 0.90-0.95 - хорошее согласие  
+        - R² < 0.90 - требуется улучшение модели
+        """)
+    
     # Подбор показателя степени n
+    st.subheader("Поиск оптимального показателя степени n")
+    
     n_min, n_max, n_step = 3.0, 5.0, 0.1
     n_candidates = np.arange(n_min, n_max + n_step, n_step)
     
@@ -423,8 +444,7 @@ if 'grain10_data' in st.session_state:
                 'min_R2': k_df['R2'].min(), 'n_temperatures': len(k_df)
             }
     
-    # Определение лучшего n
-    best_n = None
+    # Визуализация подбора n
     if n_results:
         comparison_data = []
         for n, results in n_results.items():
@@ -441,6 +461,156 @@ if 'grain10_data' in st.session_state:
             best_n = best_n_row['n']
             
             st.success(f"🎯 Оптимальный показатель: n = {best_n:.1f} (R² = {best_n_row['Средний R²']:.3f})")
+            
+            # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
+            st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")
+            
+            best_k_df = n_results[best_n]['k_df']
+            
+            # Визуализация для всех температур с данными
+            temps_with_data = sorted(available_temperatures)
+            
+            if len(temps_with_data) > 0:
+                n_cols = min(2, len(temps_with_data))
+                n_rows = (len(temps_with_data) + n_cols - 1) // n_cols
+                
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
+                
+                # Делаем axes всегда двумерным массивом для единообразия
+                if n_rows == 1 and n_cols == 1:
+                    axes = np.array([[axes]])
+                elif n_rows == 1:
+                    axes = np.array([axes])
+                elif n_cols == 1:
+                    axes = axes.reshape(-1, 1)
+                
+                for idx, temp in enumerate(temps_with_data):
+                    if idx < n_rows * n_cols:
+                        row = idx // n_cols
+                        col = idx % n_cols
+                        
+                        ax = axes[row, col]
+                        temp_data = df_grain10[df_grain10['T'] == temp]
+                        
+                        # Безопасное получение k_value
+                        temp_k_data = best_k_df[best_k_df['T'] == temp]
+                        if len(temp_k_data) > 0:
+                            k_value = temp_k_data['K'].iloc[0]
+                            
+                            # Расчет предсказаний
+                            t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max() * 1.2, 100)
+                            d_pred_range = (k_value * t_range + initial_diameter**best_n)**(1/best_n)
+                            
+                            # Убедимся, что предсказания положительные
+                            d_pred_range = np.maximum(d_pred_range, 0.1)  # Минимальный диаметр 0.1 мкм
+                            
+                            d_pred_points = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
+                            d_pred_points = np.maximum(d_pred_points, 0.1)
+                            
+                            safe_plot_with_diagnostics(
+                                ax, temp_data['t'].values, temp_data['d'].values, d_pred_points,
+                                t_range, d_pred_range, 
+                                title=f'Температура {temp}°C',
+                                ylabel='Диаметр (мкм)',
+                                model_name=f'Модель (n={best_n:.1f})'
+                            )
+                        else:
+                            ax.text(0.5, 0.5, f'Нет данных для {temp}°C', 
+                                   transform=ax.transAxes, ha='center', va='center')
+                            ax.set_title(f'Температура {temp}°C')
+                
+                # Скрываем пустые subplots
+                for idx in range(len(temps_with_data), n_rows * n_cols):
+                    row = idx // n_cols
+                    col = idx % n_cols
+                    axes[row, col].set_visible(False)
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                
+                # Анализ расхождений модели и эксперимента
+                st.subheader("📊 Анализ расхождений модели и эксперимента")
+                
+                with st.expander("💡 Объяснение графиков расхождений"):
+                    st.markdown("""
+                    **График остатков (Residuals Plot):**
+                    - Показывает разницу между экспериментальными и предсказанными значениями
+                    - **Идеально:** точки случайно разбросаны вокруг нулевой линии
+                    - **Проблема:** видимый тренд или структура в остатках
+                    
+                    **График фактические vs предсказанные:**
+                    - Показывает общее качество предсказаний
+                    - **Идеально:** точки близко к диагональной линии
+                    - Цвет точек показывает температуру эксперимента
+                    """)
+                
+                all_actual = []
+                all_predicted = []
+                all_temperatures = []
+                
+                for temp in temps_with_data:
+                    temp_data = df_grain10[df_grain10['T'] == temp]
+                    temp_k_data = best_k_df[best_k_df['T'] == temp]
+                    
+                    if len(temp_k_data) > 0:
+                        k_value = temp_k_data['K'].iloc[0]
+                        d_pred = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
+                        d_pred = np.maximum(d_pred, 0.1)  # Защита от отрицательных значений
+                        
+                        all_actual.extend(temp_data['d'].values)
+                        all_predicted.extend(d_pred)
+                        all_temperatures.extend([temp] * len(temp_data))
+                
+                if len(all_actual) > 0:
+                    # График остатков
+                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+                    
+                    residuals = np.array(all_actual) - np.array(all_predicted)
+                    
+                    # График 1: Остатки vs предсказания
+                    ax1.scatter(all_predicted, residuals, alpha=0.7)
+                    ax1.axhline(0, color='red', linestyle='--', label='Нулевая ошибка')
+                    ax1.set_xlabel('Предсказанные значения диаметра (мкм)')
+                    ax1.set_ylabel('Остатки = Факт - Прогноз (мкм)')
+                    ax1.set_title('Остатки модели диаметров\n(чем ближе к нулю - тем лучше)')
+                    ax1.legend()
+                    ax1.grid(True, alpha=0.3)
+                    
+                    # График 2: Фактические vs предсказанные значения
+                    scatter = ax2.scatter(all_actual, all_predicted, alpha=0.7, 
+                                        c=all_temperatures, cmap='viridis', s=60)
+                    min_val = min(min(all_actual), min(all_predicted))
+                    max_val = max(max(all_actual), max(all_predicted))
+                    ax2.plot([min_val, max_val], [min_val, max_val], 'r--', 
+                            linewidth=2, label='Идеальное согласие')
+                    ax2.set_xlabel('Фактические диаметры (мкм)')
+                    ax2.set_ylabel('Предсказанные диаметры (мкм)')
+                    ax2.set_title('Фактические vs предсказанные значения\n(чем ближе к линии - тем лучше)')
+                    ax2.legend()
+                    ax2.grid(True, alpha=0.3)
+                    
+                    # Цветовая шкала для температур
+                    cbar = plt.colorbar(scatter, ax=ax2)
+                    cbar.set_label('Температура (°C)')
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig)
+                    
+                    # Общая статистика
+                    overall_metrics = calculate_comprehensive_metrics(np.array(all_actual), np.array(all_predicted))
+                    st.info(f"""
+                    **📈 Общая статистика модели диаметров:**
+                    - **R² = {overall_metrics['R²']:.3f}** - доля объясненной дисперсии
+                    - **RMSE = {overall_metrics['RMSE']:.2f} мкм** - средняя ошибка предсказания
+                    - **MAE = {overall_metrics['MAE']:.2f} мкм** - средняя абсолютная ошибка
+                    - **MAPE = {overall_metrics['MAPE']:.1f}%** - средняя процентная ошибка
+                    
+                    **🎯 Оценка качества:**
+                    { '✅ Отличное согласие' if overall_metrics['R²'] > 0.95 else 
+                      '🟡 Хорошее согласие' if overall_metrics['R²'] > 0.85 else 
+                      '🟠 Умеренное согласие' if overall_metrics['R²'] > 0.7 else 
+                      '🔴 Требуется улучшение модели'}
+                    """)
 
     # УНИВЕРСАЛЬНАЯ МОДЕЛЬ С УЧЕТОМ ОБОИХ ТЕМПЕРАТУРНЫХ ОГРАНИЧЕНИЙ
     st.header("3. 🔬 Универсальная модель для всех температур")
@@ -455,6 +625,23 @@ if 'grain10_data' in st.session_state:
     if best_n is not None:
         # Подбор универсальной модели для диаметра
         st.subheader("Универсальная модель роста диаметра")
+        
+        with st.expander("💡 Объяснение универсальной модели"):
+            st.markdown(f"""
+            **Универсальная модель диаметра:**
+            $$ d(t,T) = \\left[ k_{{eff}}(T) \\cdot t + d_0^n \\right]^{{1/n}} $$
+            
+            $$ k_{{eff}}(T) = \\begin{{cases}}
+            0 & \\text{{если }} T < {min_temperature}°C \\\\
+            A \\cdot \\exp\\left(-\\frac{{E_a}}{{RT}}\\right) & \\text{{если }} {min_temperature}°C \\leq T \\leq {dissolution_temperature}°C \\\\
+            0 & \\text{{если }} T > {dissolution_temperature}°C
+            \\end{{cases}} $$
+            
+            **Физический смысл:**
+            - При T < {min_temperature}°C: превращение не начинается
+            - При {min_temperature}°C ≤ T ≤ {dissolution_temperature}°C: нормальный рост по степенному закону
+            - При T > {dissolution_temperature}°C: σ-фаза растворяется
+            """)
         
         # Подбор параметров универсальной модели
         universal_diameter_params, universal_diameter_cov = fit_universal_diameter_model(
@@ -638,22 +825,43 @@ if 'grain10_data' in st.session_state:
         else:
             st.error("❌ Не удалось подобрать параметры универсальной модели фазы")
 
-    # КАЛЬКУЛЯТОР
+    # КАЛЬКУЛЯТОР С СОХРАНЕНИЕМ СОСТОЯНИЯ
     st.header("4. 🧮 Калькулятор прогнозирования")
     
+    # Используем session_state для сохранения состояния
     calc_type = st.radio("Тип расчета:", 
-                        ["Прогноз диаметра/содержания", "Определение температуры"])
+                        ["Прогноз диаметра/содержания", "Определение температуры"],
+                        key='calc_type_radio')
     
-    if calc_type == "Прогноз диаметра/содержания":
+    # Обновляем session_state при изменении выбора
+    if calc_type != st.session_state.calc_type:
+        st.session_state.calc_type = calc_type
+    
+    if st.session_state.calc_type == "Прогноз диаметра/содержания":
+        st.subheader("Прогноз параметров по заданным времени и температуре")
+        
         col1, col2, col3 = st.columns(3)
         with col1:
-            target_time = st.number_input("Время (часы)", value=100.0, min_value=0.0, step=10.0)
+            target_time = st.number_input("Время (часы)", 
+                                        value=st.session_state.target_time, 
+                                        min_value=0.0, step=10.0,
+                                        key='target_time_input')
+            st.session_state.target_time = target_time
+            
         with col2:
-            target_temp = st.number_input("Температура (°C)", value=800.0, min_value=0.0, step=10.0)
+            target_temp = st.number_input("Температура (°C)", 
+                                         value=st.session_state.target_temp,
+                                         min_value=0.0, step=10.0,
+                                         key='target_temp_input')
+            st.session_state.target_temp = target_temp
+            
         with col3:
-            calc_mode = st.selectbox("Рассчитать:", ["Диаметр", "Содержание фазы", "Оба параметра"])
+            calc_mode = st.selectbox("Рассчитать:", 
+                                   ["Диаметр", "Содержание фазы", "Оба параметра"],
+                                   key='calc_mode_select')
+            st.session_state.calc_mode = calc_mode
         
-        if st.button("Рассчитать"):
+        if st.button("Рассчитать прогноз", key='calculate_forecast'):
             if target_temp < min_temperature:
                 st.warning(f"⚠️ Температура {target_temp}°C ниже минимальной {min_temperature}°C")
                 st.info(f"**При {target_temp}°C процесс не происходит:**")
@@ -671,13 +879,19 @@ if 'grain10_data' in st.session_state:
             else:
                 st.success(f"✅ Температура {target_temp}°C в рабочем диапазоне {min_temperature}°C - {dissolution_temperature}°C")
                 
-                if calc_mode in ["Диаметр", "Оба параметра"] and universal_diameter_params is not None:
+                # Получаем параметры моделей из предыдущих расчетов
+                universal_diameter_params = st.session_state.get('universal_diameter_params')
+                universal_phase_params = st.session_state.get('universal_phase_params')
+                best_n = st.session_state.get('best_n')
+                
+                if calc_mode in ["Диаметр", "Оба параметра"] and universal_diameter_params is not None and best_n is not None:
                     A_diam, Ea_diam = universal_diameter_params
                     predicted_diameter = universal_diameter_model_single(
                         target_time, target_temp, A_diam, Ea_diam, best_n, initial_diameter, 
                         min_temperature, dissolution_temperature
                     )
                     st.success(f"**Прогнозируемый диаметр:** {predicted_diameter:.2f} мкм")
+                    st.info(f"Рост от начального {initial_diameter} мкм до {predicted_diameter:.2f} мкм")
                 
                 if calc_mode in ["Содержание фазы", "Оба параметра"] and universal_phase_params is not None:
                     A_phase, Ea_phase, n_phase = universal_phase_params
@@ -686,20 +900,130 @@ if 'grain10_data' in st.session_state:
                         min_temperature, dissolution_temperature
                     )
                     st.success(f"**Прогнозируемое содержание фазы:** {predicted_phase:.1f}%")
+                    
+                if universal_diameter_params is None and universal_phase_params is None:
+                    st.error("❌ Модели не были рассчитаны. Сначала выполните анализ данных.")
+    
+    else:  # Определение температуры
+        st.subheader("Определение температуры для достижения целевых значений")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            target_time_temp = st.number_input("Время (часы)", 
+                                             value=st.session_state.target_time_temp,
+                                             min_value=0.0, step=10.0,
+                                             key='target_time_temp_input')
+            st.session_state.target_time_temp = target_time_temp
+            
+        with col2:
+            target_value = st.number_input("Целевое значение", 
+                                         value=st.session_state.target_value,
+                                         min_value=0.0, step=0.1,
+                                         key='target_value_input')
+            st.session_state.target_value = target_value
+            
+        with col3:
+            temp_mode = st.selectbox("Тип целевого значения:", 
+                                   ["Диаметр (мкм)", "Содержание фазы (%)"],
+                                   key='temp_mode_select')
+            st.session_state.temp_mode = temp_mode
+        
+        if st.button("Найти температуру", key='find_temperature'):
+            # Минимальная температура для поиска - в рабочем диапазоне
+            search_min = max(400, min_temperature)
+            search_max = min(1200, dissolution_temperature)
+            
+            if search_min >= search_max:
+                st.error("❌ Рабочий диапазон температур пуст. Проверьте настройки T_min и T_diss.")
+            else:
+                universal_diameter_params = st.session_state.get('universal_diameter_params')
+                universal_phase_params = st.session_state.get('universal_phase_params')
+                best_n = st.session_state.get('best_n')
+                
+                if temp_mode == "Диаметр (мкм)" and universal_diameter_params is not None and best_n is not None:
+                    A_diam, Ea_diam = universal_diameter_params
+                    
+                    def equation(T):
+                        k = effective_rate_constant_single(T, A_diam, Ea_diam, min_temperature, dissolution_temperature)
+                        return (k * target_time_temp + initial_diameter**best_n)**(1/best_n) - target_value
+                    
+                    # Ищем температуру в рабочем диапазоне
+                    T_candidates = np.linspace(search_min, search_max, 1000)
+                    differences = [equation(T) for T in T_candidates]
+                    
+                    # Находим температуру, где разница ближе всего к нулю
+                    idx_min = np.argmin(np.abs(differences))
+                    optimal_temp = T_candidates[idx_min]
+                    
+                    if np.abs(differences[idx_min]) < 0.1:  # Допустимая погрешность
+                        st.success(f"**Необходимая температура:** {optimal_temp:.1f}°C")
+                        st.info(f"При {optimal_temp:.1f}°C за {target_time_temp} часов диаметр достигнет {target_value} мкм")
+                        
+                        # Показываем дополнительную информацию
+                        current_diameter = universal_diameter_model_single(
+                            target_time_temp, optimal_temp, A_diam, Ea_diam, best_n, 
+                            initial_diameter, min_temperature, dissolution_temperature
+                        )
+                        st.info(f"Проверка: расчетный диаметр = {current_diameter:.2f} мкм")
+                    else:
+                        st.warning("Не удалось найти точное решение в рабочем диапазоне температур")
+                        st.info(f"Наиболее близкая температура: {optimal_temp:.1f}°C")
+                
+                elif temp_mode == "Содержание фазы (%)" and universal_phase_params is not None:
+                    A_phase, Ea_phase, n_phase = universal_phase_params
+                    
+                    def equation_phase(T):
+                        k = effective_rate_constant_single(T, A_phase, Ea_phase, min_temperature, dissolution_temperature)
+                        return jmak_model(target_time_temp, k, n_phase) * 100 - target_value
+                    
+                    T_candidates = np.linspace(search_min, search_max, 1000)
+                    differences = [equation_phase(T) for T in T_candidates]
+                    
+                    idx_min = np.argmin(np.abs(differences))
+                    optimal_temp = T_candidates[idx_min]
+                    
+                    if np.abs(differences[idx_min]) < 1.0:  # Допустимая погрешность 1%
+                        st.success(f"**Необходимая температура:** {optimal_temp:.1f}°C")
+                        st.info(f"При {optimal_temp:.1f}°C за {target_time_temp} часов содержание фазы достигнет {target_value}%")
+                        
+                        # Показываем дополнительную информацию
+                        current_phase = universal_phase_model_single(
+                            target_time_temp, optimal_temp, A_phase, Ea_phase, n_phase,
+                            min_temperature, dissolution_temperature
+                        )
+                        st.info(f"Проверка: расчетное содержание фазы = {current_phase:.1f}%")
+                    else:
+                        st.warning("Не удалось найти точное решение в рабочем диапазоне температур")
+                        st.info(f"Наиболее близкая температура: {optimal_temp:.1f}°C")
+                
+                else:
+                    st.error("❌ Модели не были рассчитаны. Сначала выполните анализ данных.")
 
-st.header("🎯 Рекомендации по использованию моделей")
+# Сохраняем параметры моделей в session_state для использования в калькуляторе
+if 'grain10_data' in st.session_state and 'best_n' in locals():
+    st.session_state.best_n = best_n
+if 'universal_diameter_params' in locals() and universal_diameter_params is not None:
+    st.session_state.universal_diameter_params = universal_diameter_params
+if 'universal_phase_params' in locals() and universal_phase_params is not None:
+    st.session_state.universal_phase_params = universal_phase_params
 
-st.markdown(f"""
-**Универсальные модели с учетом температурных ограничений позволяют:**
+st.header("🎯 Рекомендации по использованию калькулятора")
 
-1. **Точно прогнозировать** поведение системы в реальных условиях
-2. **Учитывать физические ограничения** процесса:
-   - Ниже {min_temperature}°C: превращение не начинается
-   - Выше {dissolution_temperature}°C: σ-фаза растворяется
-   - {min_temperature}°C - {dissolution_temperature}°C: нормальный рост
+st.markdown("""
+**Как использовать калькулятор:**
 
-**Температурные зоны на графиках:**
-- 🔴 Красные крестики: T < {min_temperature}°C (процесс не идет)
-- 🔵 Синие кружки: рабочий диапазон (нормальный рост)
-- 🟠 Оранжевые треугольники: T > {dissolution_temperature}°C (растворение)
+1. **Прогноз параметров:**
+   - Задайте время и температуру
+   - Выберите, что хотите рассчитать (диаметр, содержание фазы или оба параметра)
+   - Нажмите "Рассчитать прогноз"
+
+2. **Определение температуры:**
+   - Задайте время и целевое значение (диаметр или содержание фазы)
+   - Нажмите "Найти температуру"
+   - Калькулятор найдет оптимальную температуру в рабочем диапазоне
+
+**Важно:**
+- Калькулятор работает только после успешного анализа данных
+- Учитываются температурные ограничения (T_min и T_diss)
+- Результаты основаны на подобранных универсальных моделях
 """)

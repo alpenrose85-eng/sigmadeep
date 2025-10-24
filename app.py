@@ -21,6 +21,7 @@ st.markdown("""
 - Учет минимальной температуры начала превращения (550°C)
 - Учет температуры растворения σ-фазы (900°C)
 - Интерактивный калькулятор для прогнозирования
+- **НОВОЕ: Интерактивный график модели**
 - Аррениусовская зависимость констант скорости
 - Автоматическое масштабирование графиков под данные
 """)
@@ -68,6 +69,12 @@ if 'target_value' not in st.session_state:
     st.session_state.target_value = 2.0
 if 'temp_mode' not in st.session_state:
     st.session_state.temp_mode = "Диаметр (мкм)"
+if 'interactive_temp' not in st.session_state:
+    st.session_state.interactive_temp = 800.0
+if 'interactive_mode' not in st.session_state:
+    st.session_state.interactive_mode = "Диаметр"
+if 'max_time_interactive' not in st.session_state:
+    st.session_state.max_time_interactive = 400000.0
 
 # Функции для расчета метрик качества
 def calculate_comprehensive_metrics(y_true, y_pred):
@@ -304,6 +311,74 @@ def fit_universal_phase_model(df, T_min, T_diss):
         st.error(f"Ошибка подбора универсальной модели фазы: {str(e)}")
         return None, None
 
+# НОВАЯ ФУНКЦИЯ: Интерактивный график модели
+def plot_interactive_model(temperature, mode, max_time, universal_diameter_params, universal_phase_params, best_n, initial_diameter, min_temperature, dissolution_temperature):
+    """Построение интерактивного графика модели"""
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Создаем диапазон времени от 0 до max_time часов
+    time_range = np.linspace(0, max_time, 1000)
+    
+    if mode == "Диаметр" and universal_diameter_params is not None and best_n is not None:
+        A_diam, Ea_diam = universal_diameter_params
+        
+        # Рассчитываем диаметр для каждого момента времени
+        diameters = []
+        for t in time_range:
+            d = universal_diameter_model_single(
+                t, temperature, A_diam, Ea_diam, best_n, initial_diameter,
+                min_temperature, dissolution_temperature
+            )
+            diameters.append(d)
+        
+        ax.plot(time_range, diameters, 'b-', linewidth=3, label=f'Модель диаметра при {temperature}°C')
+        ax.set_ylabel('Диаметр (мкм)', fontsize=12)
+        ax.set_title(f'Зависимость диаметра σ-фазы от времени при {temperature}°C', fontsize=14, fontweight='bold')
+        
+        # Добавляем горизонтальную линию начального диаметра
+        ax.axhline(y=initial_diameter, color='r', linestyle='--', alpha=0.7, label=f'Начальный диаметр ({initial_diameter} мкм)')
+        
+        # Показываем конечное значение
+        final_diameter = diameters[-1]
+        ax.axhline(y=final_diameter, color='g', linestyle='--', alpha=0.7, label=f'Конечный диаметр ({final_diameter:.2f} мкм)')
+        
+    elif mode == "Содержание фазы" and universal_phase_params is not None:
+        A_phase, Ea_phase, n_phase = universal_phase_params
+        
+        # Рассчитываем содержание фазы для каждого момента времени
+        phase_contents = []
+        for t in time_range:
+            f = universal_phase_model_single(
+                t, temperature, A_phase, Ea_phase, n_phase,
+                min_temperature, dissolution_temperature
+            )
+            phase_contents.append(f)
+        
+        ax.plot(time_range, phase_contents, 'r-', linewidth=3, label=f'Модель содержания фазы при {temperature}°C')
+        ax.set_ylabel('Содержание фазы (%)', fontsize=12)
+        ax.set_title(f'Зависимость содержания σ-фазы от времени при {temperature}°C', fontsize=14, fontweight='bold')
+        
+        # Показываем конечное значение
+        final_phase = phase_contents[-1]
+        ax.axhline(y=final_phase, color='g', linestyle='--', alpha=0.7, label=f'Конечное содержание ({final_phase:.2f}%)')
+    
+    else:
+        ax.text(0.5, 0.5, 'Модель не рассчитана', transform=ax.transAxes, 
+                ha='center', va='center', fontsize=16)
+        ax.set_title('Недостаточно данных для построения графика', fontsize=14)
+    
+    ax.set_xlabel('Время (часы)', fontsize=12)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=10)
+    
+    # Улучшаем читаемость больших чисел на оси X
+    if max_time >= 1000:
+        ax.ticklabel_format(axis='x', style='scientific', scilimits=(0,0))
+        ax.xaxis.get_offset_text().set_fontsize(10)
+    
+    plt.tight_layout()
+    return fig
+
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -445,7 +520,8 @@ if 'grain10_data' in st.session_state:
                 'min_R2': k_df['R2'].min(), 'n_temperatures': len(k_df)
             }
     
-    # Визуализация подбора n
+    # Определение лучшего n
+    best_n = None
     if n_results:
         comparison_data = []
         for n, results in n_results.items():
@@ -462,156 +538,6 @@ if 'grain10_data' in st.session_state:
             best_n = best_n_row['n']
             
             st.success(f"🎯 Оптимальный показатель: n = {best_n:.1f} (R² = {best_n_row['Средний R²']:.3f})")
-            
-            # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
-            st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")
-            
-            best_k_df = n_results[best_n]['k_df']
-            
-            # Визуализация для всех температур с данными
-            temps_with_data = sorted(available_temperatures)
-            
-            if len(temps_with_data) > 0:
-                n_cols = min(2, len(temps_with_data))
-                n_rows = (len(temps_with_data) + n_cols - 1) // n_cols
-                
-                fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
-                
-                # Делаем axes всегда двумерным массивом для единообразия
-                if n_rows == 1 and n_cols == 1:
-                    axes = np.array([[axes]])
-                elif n_rows == 1:
-                    axes = np.array([axes])
-                elif n_cols == 1:
-                    axes = axes.reshape(-1, 1)
-                
-                for idx, temp in enumerate(temps_with_data):
-                    if idx < n_rows * n_cols:
-                        row = idx // n_cols
-                        col = idx % n_cols
-                        
-                        ax = axes[row, col]
-                        temp_data = df_grain10[df_grain10['T'] == temp]
-                        
-                        # Безопасное получение k_value
-                        temp_k_data = best_k_df[best_k_df['T'] == temp]
-                        if len(temp_k_data) > 0:
-                            k_value = temp_k_data['K'].iloc[0]
-                            
-                            # Расчет предсказаний
-                            t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max() * 1.2, 100)
-                            d_pred_range = (k_value * t_range + initial_diameter**best_n)**(1/best_n)
-                            
-                            # Убедимся, что предсказания положительные
-                            d_pred_range = np.maximum(d_pred_range, 0.1)  # Минимальный диаметр 0.1 мкм
-                            
-                            d_pred_points = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
-                            d_pred_points = np.maximum(d_pred_points, 0.1)
-                            
-                            safe_plot_with_diagnostics(
-                                ax, temp_data['t'].values, temp_data['d'].values, d_pred_points,
-                                t_range, d_pred_range, 
-                                title=f'Температура {temp}°C',
-                                ylabel='Диаметр (мкм)',
-                                model_name=f'Модель (n={best_n:.1f})'
-                            )
-                        else:
-                            ax.text(0.5, 0.5, f'Нет данных для {temp}°C', 
-                                   transform=ax.transAxes, ha='center', va='center')
-                            ax.set_title(f'Температура {temp}°C')
-                
-                # Скрываем пустые subplots
-                for idx in range(len(temps_with_data), n_rows * n_cols):
-                    row = idx // n_cols
-                    col = idx % n_cols
-                    axes[row, col].set_visible(False)
-                
-                plt.tight_layout()
-                st.pyplot(fig)
-                
-                # Анализ расхождений модели и эксперимента
-                st.subheader("📊 Анализ расхождений модели и эксперимента")
-                
-                with st.expander("💡 Объяснение графиков расхождений"):
-                    st.markdown("""
-                    **График остатков (Residuals Plot):**
-                    - Показывает разницу между экспериментальными и предсказанными значениями
-                    - **Идеально:** точки случайно разбросаны вокруг нулевой линии
-                    - **Проблема:** видимый тренд или структура в остатках
-                    
-                    **График фактические vs предсказанные:**
-                    - Показывает общее качество предсказаний
-                    - **Идеально:** точки близко к диагональной линии
-                    - Цвет точек показывает температуру эксперимента
-                    """)
-                
-                all_actual = []
-                all_predicted = []
-                all_temperatures = []
-                
-                for temp in temps_with_data:
-                    temp_data = df_grain10[df_grain10['T'] == temp]
-                    temp_k_data = best_k_df[best_k_df['T'] == temp]
-                    
-                    if len(temp_k_data) > 0:
-                        k_value = temp_k_data['K'].iloc[0]
-                        d_pred = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
-                        d_pred = np.maximum(d_pred, 0.1)  # Защита от отрицательных значений
-                        
-                        all_actual.extend(temp_data['d'].values)
-                        all_predicted.extend(d_pred)
-                        all_temperatures.extend([temp] * len(temp_data))
-                
-                if len(all_actual) > 0:
-                    # График остатков
-                    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-                    
-                    residuals = np.array(all_actual) - np.array(all_predicted)
-                    
-                    # График 1: Остатки vs предсказания
-                    ax1.scatter(all_predicted, residuals, alpha=0.7)
-                    ax1.axhline(0, color='red', linestyle='--', label='Нулевая ошибка')
-                    ax1.set_xlabel('Предсказанные значения диаметра (мкм)')
-                    ax1.set_ylabel('Остатки = Факт - Прогноз (мкм)')
-                    ax1.set_title('Остатки модели диаметров\n(чем ближе к нулю - тем лучше)')
-                    ax1.legend()
-                    ax1.grid(True, alpha=0.3)
-                    
-                    # График 2: Фактические vs предсказанные значения
-                    scatter = ax2.scatter(all_actual, all_predicted, alpha=0.7, 
-                                        c=all_temperatures, cmap='viridis', s=60)
-                    min_val = min(min(all_actual), min(all_predicted))
-                    max_val = max(max(all_actual), max(all_predicted))
-                    ax2.plot([min_val, max_val], [min_val, max_val], 'r--', 
-                            linewidth=2, label='Идеальное согласие')
-                    ax2.set_xlabel('Фактические диаметры (мкм)')
-                    ax2.set_ylabel('Предсказанные диаметры (мкм)')
-                    ax2.set_title('Фактические vs предсказанные значения\n(чем ближе к линии - тем лучше)')
-                    ax2.legend()
-                    ax2.grid(True, alpha=0.3)
-                    
-                    # Цветовая шкала для температур
-                    cbar = plt.colorbar(scatter, ax=ax2)
-                    cbar.set_label('Температура (°C)')
-                    
-                    plt.tight_layout()
-                    st.pyplot(fig)
-                    
-                    # Общая статистика
-                    overall_metrics = calculate_comprehensive_metrics(np.array(all_actual), np.array(all_predicted))
-                    st.info(f"""
-                    **📈 Общая статистика модели диаметров:**
-                    - **R² = {overall_metrics['R²']:.3f}** - доля объясненной дисперсии
-                    - **RMSE = {overall_metrics['RMSE']:.2f} мкм** - средняя ошибка предсказания
-                    - **MAE = {overall_metrics['MAE']:.2f} мкм** - средняя абсолютная ошибка
-                    - **MAPE = {overall_metrics['MAPE']:.1f}%** - средняя процентная ошибка
-                    
-                    **🎯 Оценка качества:**
-                    { '✅ Отличное согласие' if overall_metrics['R²'] > 0.95 else 
-                      '🟡 Хорошее согласие' if overall_metrics['R²'] > 0.85 else 
-                      '🟠 Умеренное согласие' if overall_metrics['R²'] > 0.7 else 
-                      '🔴 Требуется улучшение модели'}
-                    """)
 
     # УНИВЕРСАЛЬНАЯ МОДЕЛЬ С УЧЕТОМ ОБОИХ ТЕМПЕРАТУРНЫХ ОГРАНИЧЕНИЙ
     st.header("3. 🔬 Универсальная модель для всех температур")
@@ -661,82 +587,7 @@ if 'grain10_data' in st.session_state:
             - Начальный диаметр d₀ = {initial_diameter} мкм
             - Рабочий диапазон: {min_temperature}°C - {dissolution_temperature}°C
             """)
-            
-            # Визуализация универсальной модели
-            st.subheader("Визуализация универсальной модели диаметра")
-            
-            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-            
-            # График 1: Предсказания vs экспериментальные данные
-            all_predictions_diam = []
-            all_actual_diam = []
-            
-            for temp in df_grain10['T'].unique():
-                temp_data = df_grain10[df_grain10['T'] == temp]
-                t_temp = temp_data['t'].values
-                T_temp = np.array([temp] * len(t_temp))
-                
-                # Предсказания универсальной модели
-                d_pred_universal = universal_diameter_model_array(
-                    t_temp, T_temp, A_diam, Ea_diam, best_n, initial_diameter, 
-                    min_temperature, dissolution_temperature
-                )
-                
-                # Определяем цвет и маркер в зависимости от температурной зоны
-                if temp < min_temperature:
-                    color, marker, label_suffix = 'red', 'x', ' (ниже T_min)'
-                elif temp > dissolution_temperature:
-                    color, marker, label_suffix = 'orange', '^', ' (выше T_diss)'
-                else:
-                    color, marker, label_suffix = 'blue', 'o', ''
-                
-                axes[0].scatter(temp_data['t'], temp_data['d'], alpha=0.7, 
-                               color=color, marker=marker, s=50,
-                               label=f'{temp}°C{label_suffix}')
-                
-                # Строим линии только для рабочего диапазона
-                if min_temperature <= temp <= dissolution_temperature:
-                    axes[0].plot(temp_data['t'], d_pred_universal, '--', 
-                                color=color, linewidth=2)
-                
-                all_predictions_diam.extend(d_pred_universal)
-                all_actual_diam.extend(temp_data['d'].values)
-            
-            # Добавляем линии температурных границ
-            axes[0].axhline(initial_diameter, color='gray', linestyle=':', alpha=0.7, label=f'Начальный диаметр {initial_diameter} мкм')
-            axes[0].set_xlabel('Время (часы)')
-            axes[0].set_ylabel('Диаметр (мкм)')
-            axes[0].set_title(f'Универсальная модель диаметра\nT_min = {min_temperature}°C, T_diss = {dissolution_temperature}°C')
-            axes[0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            axes[0].grid(True, alpha=0.3)
-            
-            # График 2: Качество предсказаний (только для рабочего диапазона)
-            valid_mask = np.array([min_temperature <= T <= dissolution_temperature for T in df_grain10['T'].values])
-            if len(valid_mask) > 0:
-                valid_actual = np.array(all_actual_diam)[valid_mask[:len(all_actual_diam)]]
-                valid_predictions = np.array(all_predictions_diam)[valid_mask[:len(all_predictions_diam)]]
-                
-                if len(valid_actual) > 0:
-                    axes[1].scatter(valid_actual, valid_predictions, alpha=0.6, color='blue')
-                    min_val = min(min(valid_actual), min(valid_predictions))
-                    max_val = max(max(valid_actual), max(valid_predictions))
-                    axes[1].plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
-                    axes[1].set_xlabel('Фактические диаметры (мкм)')
-                    axes[1].set_ylabel('Предсказанные диаметры (мкм)')
-                    axes[1].set_title('Качество универсальной модели диаметра\n(только рабочий диапазон)')
-                    axes[1].grid(True, alpha=0.3)
-                    
-                    # Метрики качества (только для валидных температур)
-                    metrics_universal_diam = calculate_comprehensive_metrics(valid_actual, valid_predictions)
-                    axes[1].text(0.05, 0.95, f"R² = {metrics_universal_diam['R²']:.3f}\nRMSE = {metrics_universal_diam['RMSE']:.2f}", 
-                                transform=axes[1].transAxes, verticalalignment='top',
-                                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            
-            plt.tight_layout()
-            st.pyplot(fig)
-        else:
-            st.error("❌ Не удалось подобрать параметры универсальной модели диаметра")
-    
+
     # Универсальная модель для содержания фазы
     if enable_phase_analysis:
         st.subheader("Универсальная модель содержания фазы (JMAK)")
@@ -756,113 +607,91 @@ if 'grain10_data' in st.session_state:
             - Показатель Аврами n = {n_phase:.2f}
             - Рабочий диапазон: {min_temperature}°C - {dissolution_temperature}°C
             """)
+
+    # ИНТЕРАКТИВНЫЙ ГРАФИК МОДЕЛИ
+    st.header("4. 📈 Интерактивный график модели")
+    
+    st.markdown("""
+    **Постройте график зависимости параметров от времени для любой температуры:**
+    - Выберите температуру и параметр для построения
+    - График покажет прогноз на весь диапазон времени
+    - Учитываются температурные ограничения модели
+    """)
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        interactive_temp = st.number_input("Температура для графика (°C)", 
+                                         value=st.session_state.interactive_temp,
+                                         min_value=0.0, max_value=1500.0, step=10.0,
+                                         key='interactive_temp_input')
+        st.session_state.interactive_temp = interactive_temp
+        
+    with col2:
+        interactive_mode = st.selectbox("Параметр для графика:", 
+                                      ["Диаметр", "Содержание фазы"],
+                                      key='interactive_mode_select')
+        st.session_state.interactive_mode = interactive_mode
+        
+    with col3:
+        max_time_interactive = st.number_input("Максимальное время (часы)", 
+                                            value=st.session_state.max_time_interactive,
+                                            min_value=100.0, max_value=500000.0, step=1000.0,
+                                            key='max_time_interactive_input')
+        st.session_state.max_time_interactive = max_time_interactive
+    
+    if st.button("Построить график", key='plot_interactive'):
+        if interactive_temp < min_temperature:
+            st.warning(f"⚠️ Температура {interactive_temp}°C ниже минимальной {min_temperature}°C")
+            st.info("При этой температуре процесс не происходит. Все параметры остаются на начальных значениях.")
+        elif interactive_temp > dissolution_temperature:
+            st.warning(f"⚠️ Температура {interactive_temp}°C выше температуры растворения {dissolution_temperature}°C")
+            st.info("При этой температуре σ-фаза растворяется. Все параметры остаются на начальных значениях.")
+        else:
+            st.success(f"✅ Строим график для температуры {interactive_temp}°C")
             
-            # Визуализация универсальной модели фазы
-            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+            # Получаем параметры моделей
+            universal_diameter_params = st.session_state.get('universal_diameter_params')
+            universal_phase_params = st.session_state.get('universal_phase_params')
+            best_n = st.session_state.get('best_n')
             
-            all_predictions_phase = []
-            all_actual_phase = []
-            
-            for temp in df_grain10['T'].unique():
-                temp_data = df_grain10[df_grain10['T'] == temp]
-                if len(temp_data) >= 2:
-                    t_temp = temp_data['t'].values
-                    T_temp = np.array([temp] * len(t_temp))
-                    
-                    f_pred_universal = universal_phase_model_array(
-                        t_temp, T_temp, A_phase, Ea_phase, n_phase, 
-                        min_temperature, dissolution_temperature
-                    )
-                    
-                    # Определяем цвет и маркер в зависимости от температурной зоны
-                    if temp < min_temperature:
-                        color, marker, label_suffix = 'red', 'x', ' (ниже T_min)'
-                    elif temp > dissolution_temperature:
-                        color, marker, label_suffix = 'orange', '^', ' (выше T_diss)'
-                    else:
-                        color, marker, label_suffix = 'blue', 'o', ''
-                    
-                    axes[0].scatter(temp_data['t'], temp_data['f'], alpha=0.7, 
-                                   color=color, marker=marker, s=50,
-                                   label=f'{temp}°C{label_suffix}')
-                    
-                    # Строим линии только для рабочего диапазона
-                    if min_temperature <= temp <= dissolution_temperature:
-                        axes[0].plot(temp_data['t'], f_pred_universal, '--', 
-                                    color=color, linewidth=2)
-                    
-                    all_predictions_phase.extend(f_pred_universal)
-                    all_actual_phase.extend(temp_data['f'].values)
-            
-            # Определяем максимальное значение содержания фазы для установки графика
-            max_f_actual = max(all_actual_phase) if all_actual_phase else 10
-            max_f_predicted = max(all_predictions_phase) if all_predictions_phase else 10
-            max_f_value = max(max_f_actual, max_f_predicted)
-            y_max = max_f_value * 1.2  # Добавляем 20% запаса
-            
-            axes[0].set_xlabel('Время (часы)')
-            axes[0].set_ylabel('Содержание фазы (%)')
-            axes[0].set_ylim(0, y_max)
-            axes[0].set_title(f'Универсальная модель содержания фазы\nT_min = {min_temperature}°C, T_diss = {dissolution_temperature}°C')
-            axes[0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-            axes[0].grid(True, alpha=0.3)
-            
-            # График качества (только для рабочего диапазона)
-            valid_mask_phase = np.array([min_temperature <= T <= dissolution_temperature for T in df_grain10['T'].values])
-            if len(valid_mask_phase) > 0:
-                valid_actual_phase = np.array(all_actual_phase)[valid_mask_phase[:len(all_actual_phase)]]
-                valid_predictions_phase = np.array(all_predictions_phase)[valid_mask_phase[:len(all_predictions_phase)]]
-                
-                if len(valid_actual_phase) > 0:
-                    axes[1].scatter(valid_actual_phase, valid_predictions_phase, alpha=0.6, color='blue')
-                    
-                    # Автоматическое определение границ осей на основе данных
-                    max_actual = max(valid_actual_phase) if len(valid_actual_phase) > 0 else 10
-                    max_predicted = max(valid_predictions_phase) if len(valid_predictions_phase) > 0 else 10
-                    max_value = max(max_actual, max_predicted)
-                    
-                    # Добавляем запас 15% к максимальному значению, но не менее 1%
-                    axis_max = max(max_value * 1.15, 1.0)
-                    
-                    # Устанавливаем одинаковые границы для обеих осей
-                    axes[1].plot([0, axis_max], [0, axis_max], 'r--', linewidth=2, label='Идеальное согласие')
-                    axes[1].set_xlim(0, axis_max)
-                    axes[1].set_ylim(0, axis_max)
-                    
-                    axes[1].set_xlabel('Фактическое содержание фазы (%)')
-                    axes[1].set_ylabel('Предсказанное содержание фазы (%)')
-                    axes[1].set_title('Качество универсальной модели фазы\n(только рабочий диапазон)')
-                    axes[1].legend()
-                    axes[1].grid(True, alpha=0.3)
-                    
-                    metrics_universal_phase = calculate_comprehensive_metrics(
-                        valid_actual_phase, valid_predictions_phase
-                    )
-                    
-                    # Показываем диапазон данных в подписи
-                    data_range_info = f"Данные: 0-{max_value:.1f}%"
-                    axes[1].text(0.05, 0.95, 
-                                f"R² = {metrics_universal_phase['R²']:.3f}\nRMSE = {metrics_universal_phase['RMSE']:.3f}%\n{data_range_info}", 
-                                transform=axes[1].transAxes, verticalalignment='top',
-                                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
-            
-            plt.tight_layout()
+            # Строим график
+            fig = plot_interactive_model(
+                interactive_temp, interactive_mode, max_time_interactive,
+                universal_diameter_params, universal_phase_params, best_n,
+                initial_diameter, min_temperature, dissolution_temperature
+            )
             st.pyplot(fig)
             
-            # Дополнительная информация о диапазоне данных
-            if len(valid_actual_phase) > 0:
+            # Дополнительная информация
+            if interactive_mode == "Диаметр" and universal_diameter_params is not None and best_n is not None:
+                A_diam, Ea_diam = universal_diameter_params
+                final_diameter = universal_diameter_model_single(
+                    max_time_interactive, interactive_temp, A_diam, Ea_diam, best_n,
+                    initial_diameter, min_temperature, dissolution_temperature
+                )
                 st.info(f"""
-                **📊 Диапазон экспериментальных данных по содержанию фазы:**
-                - Минимальное содержание: {min(valid_actual_phase):.2f}%
-                - Максимальное содержание: {max(valid_actual_phase):.2f}%
-                - Среднее содержание: {np.mean(valid_actual_phase):.2f}%
-                - Масштаб графика автоматически настроен на диапазон: 0-{axis_max:.1f}%
+                **📊 Прогноз для {interactive_temp}°C за {max_time_interactive:,.0f} часов:**
+                - Начальный диаметр: {initial_diameter} мкм
+                - Конечный диаметр: {final_diameter:.2f} мкм
+                - Общий рост: {final_diameter - initial_diameter:.2f} мкм
+                - Относительный рост: {(final_diameter/initial_diameter - 1)*100:.1f}%
                 """)
-        else:
-            st.error("❌ Не удалось подобрать параметры универсальной модели фазы")
+                
+            elif interactive_mode == "Содержание фазы" and universal_phase_params is not None:
+                A_phase, Ea_phase, n_phase = universal_phase_params
+                final_phase = universal_phase_model_single(
+                    max_time_interactive, interactive_temp, A_phase, Ea_phase, n_phase,
+                    min_temperature, dissolution_temperature
+                )
+                st.info(f"""
+                **📊 Прогноз для {interactive_temp}°C за {max_time_interactive:,.0f} часов:**
+                - Конечное содержание фазы: {final_phase:.2f}%
+                - Максимально возможное: 100%
+                - Достигнуто: {final_phase:.1f}% от максимального
+                """)
 
     # КАЛЬКУЛЯТОР С СОХРАНЕНИЕМ СОСТОЯНИЯ
-    st.header("4. 🧮 Калькулятор прогнозирования")
+    st.header("5. 🧮 Калькулятор прогнозирования")
     
     # Используем session_state для сохранения состояния
     calc_type = st.radio("Тип расчета:", 
@@ -994,13 +823,6 @@ if 'grain10_data' in st.session_state:
                     if np.abs(differences[idx_min]) < 0.1:  # Допустимая погрешность
                         st.success(f"**Необходимая температура:** {optimal_temp:.1f}°C")
                         st.info(f"При {optimal_temp:.1f}°C за {target_time_temp} часов диаметр достигнет {target_value} мкм")
-                        
-                        # Показываем дополнительную информацию
-                        current_diameter = universal_diameter_model_single(
-                            target_time_temp, optimal_temp, A_diam, Ea_diam, best_n, 
-                            initial_diameter, min_temperature, dissolution_temperature
-                        )
-                        st.info(f"Проверка: расчетный диаметр = {current_diameter:.2f} мкм")
                     else:
                         st.warning("Не удалось найти точное решение в рабочем диапазоне температур")
                         st.info(f"Наиболее близкая температура: {optimal_temp:.1f}°C")
@@ -1021,13 +843,6 @@ if 'grain10_data' in st.session_state:
                     if np.abs(differences[idx_min]) < 1.0:  # Допустимая погрешность 1%
                         st.success(f"**Необходимая температура:** {optimal_temp:.1f}°C")
                         st.info(f"При {optimal_temp:.1f}°C за {target_time_temp} часов содержание фазы достигнет {target_value}%")
-                        
-                        # Показываем дополнительную информацию
-                        current_phase = universal_phase_model_single(
-                            target_time_temp, optimal_temp, A_phase, Ea_phase, n_phase,
-                            min_temperature, dissolution_temperature
-                        )
-                        st.info(f"Проверка: расчетное содержание фазы = {current_phase:.1f}%")
                     else:
                         st.warning("Не удалось найти точное решение в рабочем диапазоне температур")
                         st.info(f"Наиболее близкая температура: {optimal_temp:.1f}°C")
@@ -1053,6 +868,11 @@ st.markdown(f"""
    - Ниже {min_temperature}°C: превращение не начинается
    - Выше {dissolution_temperature}°C: σ-фаза растворяется
    - {min_temperature}°C - {dissolution_temperature}°C: нормальный рост
+
+**Новый интерактивный график:**
+- Позволяет визуализировать поведение системы для любой температуры
+- Показывает зависимость параметров от времени до 400,000 часов
+- Автоматически рассчитывает конечные значения параметров
 
 **Автоматическое масштабирование графиков:**
 - Графики качества модели автоматически настраиваются под диапазон ваших данных

@@ -6,3 +6,4 @@ scipy
 seaborn
 scikit-learn
 openpyxl
+xlrd

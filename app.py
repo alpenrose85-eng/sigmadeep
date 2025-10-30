@@ -491,64 +491,103 @@ if uploaded_file is not None:
     df = safe_load_data(uploaded_file)
     
     if df is not None:
-        required_cols = ['G', 'T', 't', 'd', 'f']
+        required_cols = ['G', 'T', 't']  # Обязательные колонки
+        optional_cols = ['d', 'f']  # Опциональные колонки
         
-        if all(col in df.columns for col in required_cols):
-            # Преобразуем все значения в столбце G в строки для единообразия
-            df['G'] = df['G'].astype(str)
+        # Проверяем обязательные колонки
+        missing_required = [col for col in required_cols if col not in df.columns]
+        if missing_required:
+            st.error(f"❌ Отсутствуют обязательные колонки: {missing_required}")
+            st.info("""
+            **Обязательные колонки:**
+            - `G` - номер/обозначение зерна
+            - `T` - температура (°C)
+            - `t` - время (часы)
+            """)
+            st.stop()
+        
+        # Проверяем наличие опциональных колонок
+        has_diameter_data = 'd' in df.columns
+        has_phase_data = 'f' in df.columns
+        
+        if not has_diameter_data and not has_phase_data:
+            st.error("❌ В данных отсутствуют и диаметры (d), и содержание фазы (f). Нечего анализировать.")
+            st.stop()
+        
+        # Преобразуем все значения в столбце G в строки для единообразия
+        df['G'] = df['G'].astype(str)
+        
+        # Показываем информацию о доступных зернах
+        all_grains = sorted(df['G'].unique())
+        
+        st.info(f"📊 В данных найдены зерна: {', '.join(map(str, all_grains))}")
+        
+        # Показываем информацию о доступных данных
+        data_info = []
+        if has_diameter_data:
+            data_info.append("📏 диаметры (d)")
+        if has_phase_data:
+            data_info.append("🔬 содержание фазы (f)")
+        st.info(f"**Доступные данные:** {', '.join(data_info)}")
+        
+        # Проверяем, существует ли выбранное зерно в данных
+        if target_grain not in all_grains:
+            st.warning(f"⚠️ Зерно '{target_grain}' не найдено в данных. Доступные зерна: {', '.join(map(str, all_grains))}")
+            # Предлагаем выбрать из доступных
+            if st.button("Выбрать из доступных зерен"):
+                target_grain = st.selectbox("Выберите зерно из доступных:", options=all_grains)
+            st.stop()
+        
+        # Фильтруем данные по выбранному зерну
+        df_selected_grain = df[df['G'] == target_grain].copy()
+        
+        if len(df_selected_grain) > 0:
+            st.session_state['grain_data'] = df_selected_grain
+            st.session_state['current_grain'] = target_grain
+            st.session_state['has_diameter_data'] = has_diameter_data
+            st.session_state['has_phase_data'] = has_phase_data
             
-            # Показываем информацию о доступных зернах
-            all_grains = sorted(df['G'].unique())
+            st.success(f"✅ Данные для зерна '{target_grain}' успешно загружены! Найдено {len(df_selected_grain)} записей")
             
-            st.info(f"📊 В данных найдены зерна: {', '.join(map(str, all_grains))}")
+            # Проверка температурного диапазона в данных
+            min_temp_in_data = df_selected_grain['T'].min()
+            max_temp_in_data = df_selected_grain['T'].max()
             
-            # Проверяем, существует ли выбранное зерно в данных
-            if target_grain not in all_grains:
-                st.warning(f"⚠️ Зерно '{target_grain}' не найдено в данных. Доступные зерна: {', '.join(map(str, all_grains))}")
-                # Предлагаем выбрать из доступных
-                if st.button("Выбрать из доступных зерен"):
-                    target_grain = st.selectbox("Выберите зерно из доступных:", options=all_grains)
-                st.stop()
+            temp_warnings = []
+            if min_temp_in_data < min_temperature:
+                temp_warnings.append(f"⚠️ В данных есть температуры ниже минимальной ({min_temp_in_data}°C < {min_temperature}°C)")
+            if max_temp_in_data > dissolution_temperature:
+                temp_warnings.append(f"⚠️ В данных есть температуры выше температуры растворения ({max_temp_in_data}°C > {dissolution_temperature}°C)")
             
-            # Фильтруем данные по выбранному зерну
-            df_selected_grain = df[df['G'] == target_grain].copy()
+            if temp_warnings:
+                for warning in temp_warnings:
+                    st.warning(warning)
+                st.info("Точки вне рабочего диапазона будут исключены из подбора универсальной модели")
             
-            if len(df_selected_grain) > 0:
-                st.session_state['grain_data'] = df_selected_grain
-                st.session_state['current_grain'] = target_grain
-                st.success(f"✅ Данные для зерна '{target_grain}' успешно загружены! Найдено {len(df_selected_grain)} записей")
-                
-                # Проверка температурного диапазона в данных
-                min_temp_in_data = df_selected_grain['T'].min()
-                max_temp_in_data = df_selected_grain['T'].max()
-                
-                temp_warnings = []
-                if min_temp_in_data < min_temperature:
-                    temp_warnings.append(f"⚠️ В данных есть температуры ниже минимальной ({min_temp_in_data}°C < {min_temperature}°C)")
-                if max_temp_in_data > dissolution_temperature:
-                    temp_warnings.append(f"⚠️ В данных есть температуры выше температуры растворения ({max_temp_in_data}°C > {dissolution_temperature}°C)")
-                
-                if temp_warnings:
-                    for warning in temp_warnings:
-                        st.warning(warning)
-                    st.info("Точки вне рабочего диапазона будут исключены из подбора универсальной модели")
-                
-                st.subheader(f"📊 Статистика данных для зерна '{target_grain}':")
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    unique_temps = df_selected_grain['T'].unique()
-                    st.metric("Температуры", f"{len(unique_temps)} уровней")
-                with col2:
-                    st.metric("Всего точек", f"{len(df_selected_grain)}")
-                with col3:
-                    st.metric("Диапазон времени", f"{df_selected_grain['t'].min()}-{df_selected_grain['t'].max()} ч")
-                with col4:
-                    st.metric("Содержание фазы", f"{df_selected_grain['f'].min():.1f}-{df_selected_grain['f'].max():.1f}%")
-                
-                st.dataframe(df_selected_grain.head(10))
-                
-            else:
-                st.error(f"❌ В данных нет записей для зерна '{target_grain}'")
+            st.subheader(f"📊 Статистика данных для зерна '{target_grain}':")
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                unique_temps = df_selected_grain['T'].unique()
+                st.metric("Температуры", f"{len(unique_temps)} уровней")
+            with col2:
+                st.metric("Всего точек", f"{len(df_selected_grain)}")
+            with col3:
+                if has_diameter_data:
+                    valid_diameter_data = df_selected_grain[df_selected_grain['d'] > 0]
+                    st.metric("Точек с диаметром", f"{len(valid_diameter_data)}")
+                else:
+                    st.metric("Данные диаметра", "❌ Отсутствуют")
+            with col4:
+                if has_phase_data:
+                    valid_phase_data = df_selected_grain[(df_selected_grain['f'] >= 0) & (df_selected_grain['f'] <= 100)]
+                    st.metric("Точек с фазой", f"{len(valid_phase_data)}")
+                else:
+                    st.metric("Данные фазы", "❌ Отсутствуют")
+            
+            st.dataframe(df_selected_grain.head(10))
+            
+        else:
+            st.error(f"❌ В данных нет записей для зерна '{target_grain}'")
         else:
             missing = [col for col in required_cols if col not in df.columns]
             st.error(f"❌ Отсутствуют необходимые колонки: {missing}")
@@ -565,9 +604,17 @@ if uploaded_file is not None:
 if 'grain_data' in st.session_state:
     df_grain = st.session_state['grain_data']
     current_grain = st.session_state.get('current_grain', target_grain)
+    has_diameter_data = st.session_state.get('has_diameter_data', False)
+    has_phase_data = st.session_state.get('has_phase_data', False)
     
     # Фильтрация аномальных данных
-    df_grain_clean = df_grain[(df_grain['d'] > 0) & (df_grain['f'] >= 0) & (df_grain['f'] <= 100)].copy()
+    if has_diameter_data:
+        df_grain_clean = df_grain[(df_grain['d'] > 0)].copy()
+    else:
+        df_grain_clean = df_grain.copy()
+    
+    if has_phase_data:
+        df_grain_clean = df_grain_clean[(df_grain_clean['f'] >= 0) & (df_grain_clean['f'] <= 100)]
     
     if len(df_grain_clean) < len(df_grain):
         st.warning(f"⚠️ Удалено {len(df_grain) - len(df_grain_clean)} аномальных точек")
@@ -579,8 +626,9 @@ if 'grain_data' in st.session_state:
     
     df_grain['T_K'] = df_grain['T'] + 273.15
     
-    # Анализ диаметров
-    st.header(f"2. 📏 Анализ диаметров σ-фазы для зерна '{current_grain}'")
+    # Анализ диаметров (только если есть данные)
+    if has_diameter_data:
+        st.header(f"2. 📏 Анализ диаметров σ-фазы для зерна '{current_grain}'")
     
     with st.expander("💡 Объяснение анализа диаметров"):
         st.markdown("""
@@ -832,7 +880,8 @@ if 'grain_data' in st.session_state:
     - **Рабочий диапазон:** {min_temperature}°C - {dissolution_temperature}°C
     """)
     
-    if 'current_best_n' in st.session_state and st.session_state.current_best_n is not None:
+    # Универсальная модель для диаметра (только если есть данные и найден best_n)
+    if has_diameter_data and 'current_best_n' in st.session_state and st.session_state.current_best_n is not None:
         best_n = st.session_state.current_best_n
         current_grain = st.session_state.get('current_grain', target_grain)
         grain_key = f"grain_{current_grain}"
@@ -954,8 +1003,8 @@ if 'grain_data' in st.session_state:
         else:
             st.error("❌ Не удалось подобрать параметры универсальной модели диаметра")
     
-    # Универсальная модель для содержания фазы
-    if enable_phase_analysis:
+    # Универсальная модель для содержания фазы (только если есть данные)
+    if has_phase_data and enable_phase_analysis:
         st.subheader("Универсальная модель содержания фазы (JMAK)")
         
         universal_phase_params, universal_phase_cov = fit_universal_phase_model(
@@ -1087,12 +1136,21 @@ if 'grain_data' in st.session_state:
     # ИНТЕРАКТИВНЫЙ ГРАФИК МОДЕЛИ
     st.header("4. 📈 Интерактивный график модели")
     
-    st.markdown("""
-    **Постройте график зависимости параметров от времени для любой температуры:**
-    - Выберите температуру и параметр для построения
-    - График покажет прогноз на весь диапазон времени
-    - Учитываются температурные ограничения модели
-    """)
+    available_modes = []
+    if has_diameter_data and st.session_state.get('current_universal_diameter_params') is not None:
+        available_modes.append("Диаметр")
+    if has_phase_data and st.session_state.get('current_universal_phase_params') is not None:
+        available_modes.append("Содержание фазы")
+    
+    if not available_modes:
+        st.warning("❌ Нет доступных моделей для построения графика")
+    else:
+        st.markdown("""
+        **Постройте график зависимости параметров от времени для любой температуры:**
+        - Выберите температуру и параметр для построения
+        - График покажет прогноз на весь диапазон времени
+        - Учитываются температурные ограничения модели
+        """)
     
     col1, col2, col3 = st.columns(3)
     with col1:

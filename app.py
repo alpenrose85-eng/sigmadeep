@@ -549,11 +549,11 @@ if 'grain_data' in st.session_state:
         - R² < 0.90 - требуется улучшение модели
         """)
     
-    # Подбор показателя степени n с расширенным диапазоном
+      # Подбор показателя степени n с расширенным диапазоном
     st.subheader("Поиск оптимального показателя степени n")
     
     # Расширенный диапазон для подбора n
-    n_min, n_max, n_step = 1.0, 6.0, 0.1
+    n_min, n_max, n_step = 1.0, 6.0, 0.001
     n_candidates = np.arange(n_min, n_max + n_step, n_step)
     
     n_results = {}
@@ -561,6 +561,8 @@ if 'grain_data' in st.session_state:
     
     for n in n_candidates:
         k_values = []
+        valid_temperatures = 0
+        total_r2 = 0
         
         for temp in df_grain['T'].unique():
             # Пропускаем температуры вне рабочего диапазона
@@ -584,24 +586,40 @@ if 'grain_data' in st.session_state:
                         d_pred_transformed = slope * temp_data['t'] + intercept
                         d_pred = (d_pred_transformed + initial_diameter**n)**(1/n)
                         
-                        if (d_pred > 0).all():
+                        if (d_pred > 0).all() and not np.isnan(r_value**2):
+                            r2 = r_value**2
+                            # Учитываем только положительные R²
+                            if r2 > 0:
+                                valid_temperatures += 1
+                                total_r2 += r2
+                            
                             metrics = calculate_comprehensive_metrics(temp_data['d'].values, d_pred)
                             
                             k_values.append({
                                 'T': temp, 'T_K': temp + 273.15, 'K': slope,
-                                'R2': r_value**2, 'std_err': std_err,
+                                'R2': r2, 'std_err': std_err,
                                 'n_points': len(temp_data), 'metrics': metrics
                             })
                             available_temperatures.add(temp)
                 except:
                     continue
         
-        if k_values:
+        if k_values and valid_temperatures > 0:
             k_df = pd.DataFrame(k_values)
-            overall_r2 = k_df['R2'].mean()
+            # Средний R² только по положительным значениям
+            overall_r2 = total_r2 / valid_temperatures if valid_temperatures > 0 else 0
+            
+            # Дополнительный критерий: количество температур с хорошим R² (>0.8)
+            good_fit_count = len([r for r in k_df['R2'] if r > 0.8])
+            
             n_results[n] = {
-                'k_df': k_df, 'mean_R2': overall_r2,
-                'min_R2': k_df['R2'].min(), 'n_temperatures': len(k_df)
+                'k_df': k_df, 
+                'mean_R2': overall_r2,
+                'min_R2': k_df['R2'].min(), 
+                'max_R2': k_df['R2'].max(),
+                'n_temperatures': len(k_df),
+                'good_fit_count': good_fit_count,
+                'valid_temperatures': valid_temperatures
             }
     
     # Визуализация подбора n
@@ -609,89 +627,134 @@ if 'grain_data' in st.session_state:
         comparison_data = []
         for n, results in n_results.items():
             comparison_data.append({
-                'n': n, 'Средний R²': results['mean_R2'],
-                'Минимальный R²': results['min_R2'], 
-                'Количество температур': results['n_temperatures']
+                'n': n, 
+                'Средний R²': results['mean_R2'],
+                'Минимальный R²': results['min_R2'],
+                'Максимальный R²': results['max_R2'],
+                'Количество температур': results['n_temperatures'],
+                'Температур с R²>0.8': results['good_fit_count']
             })
         
         comparison_df = pd.DataFrame(comparison_data)
         
-        if len(comparison_df) > 0:
+        # Ищем лучший n по комбинации критериев
+        # 1. Средний R² должен быть > 0
+        # 2. Предпочтение отдаем n с большим количеством хороших拟合ков
+        valid_results = comparison_df[comparison_df['Средний R²'] > 0].copy()
+        
+        if len(valid_results) > 0:
+            # Взвешенная оценка: 70% средний R² + 30% количество хороших拟合ков
+            max_good_fit = valid_results['Температур с R²>0.8'].max()
+            max_r2 = valid_results['Средний R²'].max()
+            
+            if max_good_fit > 0 and max_r2 > 0:
+                valid_results['score'] = (
+                    0.7 * (valid_results['Средний R²'] / max_r2) +
+                    0.3 * (valid_results['Температур с R²>0.8'] / max_good_fit)
+                )
+                best_n_row = valid_results.loc[valid_results['score'].idxmax()]
+            else:
+                best_n_row = valid_results.loc[valid_results['Средний R²'].idxmax()]
+        else:
+            # Если все R² отрицательные, берем наименее плохой
             best_n_row = comparison_df.loc[comparison_df['Средний R²'].idxmax()]
-            best_n = best_n_row['n']
+        
+        best_n = best_n_row['n']
+        
+        # Получаем детальную информацию для лучшего n
+        best_results = n_results[best_n]
+        best_k_df = best_results['k_df']
+        
+        st.success(f"🎯 Оптимальный показатель: n = {best_n:.1f}")
+        st.info(f"""
+        **Статистика для n = {best_n:.1f}:**
+        - Средний R²: {best_results['mean_R2']:.3f}
+        - Диапазон R²: {best_results['min_R2']:.3f} - {best_results['max_R2']:.3f}
+        - Количество температур: {best_results['n_temperatures']}
+        - Температур с R² > 0.8: {best_results['good_fit_count']}
+        """)
+        
+        # Показываем таблицу с R² для каждой температуры
+        st.subheader(f"Качество модели для n = {best_n:.1f} по температурам")
+        display_df = best_k_df[['T', 'R2', 'n_points']].copy()
+        display_df['R2'] = display_df['R2'].round(3)
+        display_df['Качество'] = display_df['R2'].apply(
+            lambda x: '✅ Отличное' if x > 0.9 else 
+                     '🟢 Хорошее' if x > 0.8 else 
+                     '🟡 Удовлетворительное' if x > 0.6 else 
+                     '🔴 Плохое' if x > 0 else '⚫ Очень плохое'
+        )
+        st.dataframe(display_df)
+        
+        # Сохраняем best_n в session_state с ключом для текущего зерна
+        grain_key = f"grain_{current_grain}"
+        st.session_state[f'best_n_{grain_key}'] = best_n
+        st.session_state['current_best_n'] = best_n
+        
+        # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
+        st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")
+        
+        # Визуализация для всех температур с данными
+        temps_with_data = sorted(available_temperatures)
+        
+        if len(temps_with_data) > 0:
+            n_cols = min(2, len(temps_with_data))
+            n_rows = (len(temps_with_data) + n_cols - 1) // n_cols
             
-            st.success(f"🎯 Оптимальный показатель: n = {best_n:.1f} (R² = {best_n_row['Средний R²']:.3f})")
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
             
-            # Сохраняем best_n в session_state с ключом для текущего зерна
-            grain_key = f"grain_{current_grain}"
-            st.session_state[f'best_n_{grain_key}'] = best_n
-            st.session_state['current_best_n'] = best_n
+            # Делаем axes всегда двумерным массивом для единообразия
+            if n_rows == 1 and n_cols == 1:
+                axes = np.array([[axes]])
+            elif n_rows == 1:
+                axes = np.array([axes])
+            elif n_cols == 1:
+                axes = axes.reshape(-1, 1)
             
-            # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
-            st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")
-            
-            best_k_df = n_results[best_n]['k_df']
-            
-            # Визуализация для всех температур с данными
-            temps_with_data = sorted(available_temperatures)
-            
-            if len(temps_with_data) > 0:
-                n_cols = min(2, len(temps_with_data))
-                n_rows = (len(temps_with_data) + n_cols - 1) // n_cols
-                
-                fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 4*n_rows))
-                
-                # Делаем axes всегда двумерным массивом для единообразия
-                if n_rows == 1 and n_cols == 1:
-                    axes = np.array([[axes]])
-                elif n_rows == 1:
-                    axes = np.array([axes])
-                elif n_cols == 1:
-                    axes = axes.reshape(-1, 1)
-                
-                for idx, temp in enumerate(temps_with_data):
-                    if idx < n_rows * n_cols:
-                        row = idx // n_cols
-                        col = idx % n_cols
-                        
-                        ax = axes[row, col]
-                        temp_data = df_grain[df_grain['T'] == temp]
-                        
-                        # Безопасное получение k_value
-                        temp_k_data = best_k_df[best_k_df['T'] == temp]
-                        if len(temp_k_data) > 0:
-                            k_value = temp_k_data['K'].iloc[0]
-                            
-                            # Расчет предсказаний
-                            t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max() * 1.2, 100)
-                            d_pred_range = (k_value * t_range + initial_diameter**best_n)**(1/best_n)
-                            
-                            # Убедимся, что предсказания положительные
-                            d_pred_range = np.maximum(d_pred_range, 0.1)  # Минимальный диаметр 0.1 мкм
-                            
-                            d_pred_points = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
-                            d_pred_points = np.maximum(d_pred_points, 0.1)
-                            
-                            safe_plot_with_diagnostics(
-                                ax, temp_data['t'].values, temp_data['d'].values, d_pred_points,
-                                t_range, d_pred_range, 
-                                title=f'Температура {temp}°C',
-                                ylabel='Диаметр (мкм)',
-                                model_name=f'Модель (n={best_n:.1f})'
-                            )
-                        else:
-                            ax.text(0.5, 0.5, f'Нет данных для {temp}°C', 
-                                   transform=ax.transAxes, ha='center', va='center')
-                            ax.set_title(f'Температура {temp}°C')
-                
-                # Скрываем пустые subplots
-                for idx in range(len(temps_with_data), n_rows * n_cols):
+            for idx, temp in enumerate(temps_with_data):
+                if idx < n_rows * n_cols:
                     row = idx // n_cols
                     col = idx % n_cols
-                    axes[row, col].set_visible(False)
-                
-                plt.tight_layout()
-                st.pyplot(fig)
+                    
+                    ax = axes[row, col]
+                    temp_data = df_grain[df_grain['T'] == temp]
+                    
+                    # Безопасное получение k_value
+                    temp_k_data = best_k_df[best_k_df['T'] == temp]
+                    if len(temp_k_data) > 0:
+                        k_value = temp_k_data['K'].iloc[0]
+                        r2_value = temp_k_data['R2'].iloc[0]
+                        
+                        # Расчет предсказаний
+                        t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max() * 1.2, 100)
+                        d_pred_range = (k_value * t_range + initial_diameter**best_n)**(1/best_n)
+                        
+                        # Убедимся, что предсказания положительные
+                        d_pred_range = np.maximum(d_pred_range, 0.1)  # Минимальный диаметр 0.1 мкм
+                        
+                        d_pred_points = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
+                        d_pred_points = np.maximum(d_pred_points, 0.1)
+                        
+                        safe_plot_with_diagnostics(
+                            ax, temp_data['t'].values, temp_data['d'].values, d_pred_points,
+                            t_range, d_pred_range, 
+                            title=f'{temp}°C (R² = {r2_value:.3f})',
+                            ylabel='Диаметр (мкм)',
+                            model_name=f'Модель (n={best_n:.1f})'
+                        )
+                    else:
+                        ax.text(0.5, 0.5, f'Нет данных для {temp}°C', 
+                               transform=ax.transAxes, ha='center', va='center')
+                        ax.set_title(f'Температура {temp}°C')
+            
+            # Скрываем пустые subplots
+            for idx in range(len(temps_with_data), n_rows * n_cols):
+                row = idx // n_cols
+                col = idx % n_cols
+                axes[row, col].set_visible(False)
+            
+            plt.tight_layout()
+            st.pyplot(fig)
     else:
         st.error("❌ Не удалось подобрать показатель степени n. Проверьте данные.")
 

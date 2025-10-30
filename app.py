@@ -38,35 +38,60 @@ st.markdown("""
 - **НОВОЕ: Интерактивный график модели**
 - Аррениусовская зависимость констант скорости
 - Автоматическое масштабирование графиков под данные
+- **Поддержка анализа для разных зерен (8, 9, 10)**
 """)
 
+# Информация об установке зависимостей
+with st.expander("🔧 Установка зависимостей (если возникают ошибки)"):
+    st.markdown("""
+    **Если возникают ошибки, установите зависимости:**
+    ```bash
+    pip install streamlit pandas numpy matplotlib scipy seaborn scikit-learn openpyxl
+    ```
+    
+    **Или создайте файл requirements.txt:**
+    ```
+    streamlit
+    pandas
+    numpy
+    matplotlib
+    scipy
+    seaborn
+    scikit-learn
+    openpyxl
+    ```
+    """)
+
 # Загрузка данных
-st.header("1. Загрузка данных для зерна №10")
+st.header("1. Загрузка данных")
 
 uploaded_file = st.file_uploader("Загрузите файл с данными (CSV или Excel)", 
                                type=['csv', 'xlsx', 'xls'])
 
 # Параметры анализа
 st.subheader("Параметры анализа:")
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
+    target_grain = st.selectbox("Номер зерна", 
+                              options=[8, 9, 10], 
+                              index=2,
+                              help="Выберите номер зерна для анализа")
+with col2:
     initial_diameter = st.number_input("Начальный диаметр d₀ (мкм)", 
                                      value=0.1, min_value=0.0, step=0.1,
                                      help="Рекомендуется использовать небольшое положительное значение (0.1-0.5 мкм)")
-with col2:
-    enable_phase_analysis = st.checkbox("Включить анализ содержания фазы (JMAK)", 
+with col3:
+    enable_phase_analysis = st.checkbox("Анализ содержания фазы", 
                                       value=True, 
                                       help="Анализ кинетики фазового превращения по содержанию σ-фазы")
-with col3:
-    min_temperature = st.number_input("Минимальная температура начала превращения (°C)", 
+with col4:
+    min_temperature = st.number_input("Мин. температура (°C)", 
                                     value=550.0, min_value=0.0, step=10.0,
                                     help="Температура, ниже которой превращение не происходит")
-with col4:
-    dissolution_temperature = st.number_input("Температура растворения σ-фазы (°C)", 
+with col5:
+    dissolution_temperature = st.number_input("Темп. растворения (°C)", 
                                            value=900.0, min_value=0.0, step=10.0,
                                            help="Температура, выше которой σ-фаза растворяется")
-
-target_grain = 8
 
 # Инициализация session_state для калькулятора
 if 'calc_type' not in st.session_state:
@@ -393,26 +418,58 @@ def plot_interactive_model(temperature, mode, max_time, universal_diameter_param
     plt.tight_layout()
     return fig
 
-# Основной код приложения
-if uploaded_file is not None:
+# Функция для безопасной загрузки данных
+def safe_load_data(uploaded_file):
+    """Безопасная загрузка данных с обработкой ошибок"""
     try:
         if uploaded_file.name.endswith('.csv'):
             df = pd.read_csv(uploaded_file)
+            st.success("✅ CSV файл успешно загружен")
+            return df
         else:
-            df = pd.read_excel(uploaded_file)
-        
+            # Пробуем разные движки для чтения Excel
+            try:
+                df = pd.read_excel(uploaded_file, engine='openpyxl')
+                st.success("✅ Excel файл загружен с использованием openpyxl")
+                return df
+            except ImportError:
+                st.error("❌ Библиотека openpyxl не установлена. Установите: pip install openpyxl")
+                return None
+            except Exception as e:
+                st.warning("⚠️ Не удалось загрузить с openpyxl, пробуем xlrd...")
+                try:
+                    df = pd.read_excel(uploaded_file, engine='xlrd')
+                    st.success("✅ Excel файл загружен с использованием xlrd")
+                    return df
+                except ImportError:
+                    st.error("❌ Библиотека xlrd не установлена. Установите: pip install xlrd")
+                    return None
+                except Exception as e:
+                    st.error(f"❌ Не удалось загрузить Excel файл: {e}")
+                    return None
+    except Exception as e:
+        st.error(f"❌ Ошибка загрузки файла: {e}")
+        return None
+
+# Основной код приложения
+if uploaded_file is not None:
+    df = safe_load_data(uploaded_file)
+    
+    if df is not None:
         required_cols = ['G', 'T', 't', 'd', 'f']
         
         if all(col in df.columns for col in required_cols):
-            df_grain10 = df[df['G'] == target_grain].copy()
+            # Фильтруем данные по выбранному зерну
+            df_selected_grain = df[df['G'] == target_grain].copy()
             
-            if len(df_grain10) > 0:
-                st.session_state['grain10_data'] = df_grain10
-                st.success(f"✅ Данные для зерна №10 успешно загружены!")
+            if len(df_selected_grain) > 0:
+                st.session_state['grain_data'] = df_selected_grain
+                st.session_state['current_grain'] = target_grain
+                st.success(f"✅ Данные для зерна №{target_grain} успешно загружены! Найдено {len(df_selected_grain)} записей")
                 
                 # Проверка температурного диапазона в данных
-                min_temp_in_data = df_grain10['T'].min()
-                max_temp_in_data = df_grain10['T'].max()
+                min_temp_in_data = df_selected_grain['T'].min()
+                max_temp_in_data = df_selected_grain['T'].max()
                 
                 temp_warnings = []
                 if min_temp_in_data < min_temperature:
@@ -425,43 +482,54 @@ if uploaded_file is not None:
                         st.warning(warning)
                     st.info("Точки вне рабочего диапазона будут исключены из подбора универсальной модели")
                 
-                st.subheader("📊 Статистика данных для зерна №10:")
+                st.subheader(f"📊 Статистика данных для зерна №{target_grain}:")
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    unique_temps = df_grain10['T'].unique()
+                    unique_temps = df_selected_grain['T'].unique()
                     st.metric("Температуры", f"{len(unique_temps)} уровней")
                 with col2:
-                    st.metric("Всего точек", f"{len(df_grain10)}")
+                    st.metric("Всего точек", f"{len(df_selected_grain)}")
                 with col3:
-                    st.metric("Диапазон времени", f"{df_grain10['t'].min()}-{df_grain10['t'].max()} ч")
+                    st.metric("Диапазон времени", f"{df_selected_grain['t'].min()}-{df_selected_grain['t'].max()} ч")
                 with col4:
-                    st.metric("Содержание фазы", f"{df_grain10['f'].min():.1f}-{df_grain10['f'].max():.1f}%")
+                    st.metric("Содержание фазы", f"{df_selected_grain['f'].min():.1f}-{df_selected_grain['f'].max():.1f}%")
                 
-                st.dataframe(df_grain10.head(10))
+                st.dataframe(df_selected_grain.head(10))
                 
             else:
-                st.error(f"❌ В данных нет записей для зерна №10")
+                st.error(f"❌ В данных нет записей для зерна №{target_grain}")
         else:
             missing = [col for col in required_cols if col not in df.columns]
-            st.error(f"❌ Отсутствуют колонки: {missing}")
-    except Exception as e:
-        st.error(f"❌ Ошибка загрузки: {e}")
+            st.error(f"❌ Отсутствуют необходимые колонки: {missing}")
+            st.info("""
+            **Требуемые колонки:**
+            - `G` - номер зерна
+            - `T` - температура (°C)
+            - `t` - время (часы)
+            - `d` - диаметр (мкм)
+            - `f` - содержание фазы (%)
+            """)
 
 # Основной расчет
-if 'grain10_data' in st.session_state:
-    df_grain10 = st.session_state['grain10_data']
+if 'grain_data' in st.session_state:
+    df_grain = st.session_state['grain_data']
+    current_grain = st.session_state.get('current_grain', target_grain)
     
     # Фильтрация аномальных данных
-    df_grain10_clean = df_grain10[(df_grain10['d'] > 0) & (df_grain10['f'] >= 0) & (df_grain10['f'] <= 100)].copy()
+    df_grain_clean = df_grain[(df_grain['d'] > 0) & (df_grain['f'] >= 0) & (df_grain['f'] <= 100)].copy()
     
-    if len(df_grain10_clean) < len(df_grain10):
-        st.warning(f"⚠️ Удалено {len(df_grain10) - len(df_grain10_clean)} аномальных точек")
-        df_grain10 = df_grain10_clean
+    if len(df_grain_clean) < len(df_grain):
+        st.warning(f"⚠️ Удалено {len(df_grain) - len(df_grain_clean)} аномальных точек")
+        df_grain = df_grain_clean
     
-    df_grain10['T_K'] = df_grain10['T'] + 273.15
+    if len(df_grain) == 0:
+        st.error("❌ После фильтрации не осталось валидных данных")
+        st.stop()
+    
+    df_grain['T_K'] = df_grain['T'] + 273.15
     
     # Анализ диаметров
-    st.header("2. 📏 Анализ диаметров σ-фазы")
+    st.header(f"2. 📏 Анализ диаметров σ-фазы для зерна №{current_grain}")
     
     with st.expander("💡 Объяснение анализа диаметров"):
         st.markdown("""
@@ -481,10 +549,11 @@ if 'grain10_data' in st.session_state:
         - R² < 0.90 - требуется улучшение модели
         """)
     
-    # Подбор показателя степени n
+    # Подбор показателя степени n с расширенным диапазоном
     st.subheader("Поиск оптимального показателя степени n")
     
-    n_min, n_max, n_step = 3.0, 5.0, 0.1
+    # Расширенный диапазон для подбора n
+    n_min, n_max, n_step = 1.0, 6.0, 0.1
     n_candidates = np.arange(n_min, n_max + n_step, n_step)
     
     n_results = {}
@@ -493,12 +562,12 @@ if 'grain10_data' in st.session_state:
     for n in n_candidates:
         k_values = []
         
-        for temp in df_grain10['T'].unique():
+        for temp in df_grain['T'].unique():
             # Пропускаем температуры вне рабочего диапазона
             if temp < min_temperature or temp > dissolution_temperature:
                 continue
                 
-            temp_data = df_grain10[df_grain10['T'] == temp]
+            temp_data = df_grain[df_grain['T'] == temp]
             
             if len(temp_data) >= 2:
                 d_transformed = temp_data['d']**n - initial_diameter**n
@@ -553,8 +622,10 @@ if 'grain10_data' in st.session_state:
             
             st.success(f"🎯 Оптимальный показатель: n = {best_n:.1f} (R² = {best_n_row['Средний R²']:.3f})")
             
-            # Сохраняем best_n в session_state
-            st.session_state.best_n = best_n
+            # Сохраняем best_n в session_state с ключом для текущего зерна
+            grain_key = f"grain_{current_grain}"
+            st.session_state[f'best_n_{grain_key}'] = best_n
+            st.session_state['current_best_n'] = best_n
             
             # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
             st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")
@@ -584,7 +655,7 @@ if 'grain10_data' in st.session_state:
                         col = idx % n_cols
                         
                         ax = axes[row, col]
-                        temp_data = df_grain10[df_grain10['T'] == temp]
+                        temp_data = df_grain[df_grain['T'] == temp]
                         
                         # Безопасное получение k_value
                         temp_k_data = best_k_df[best_k_df['T'] == temp]
@@ -621,6 +692,8 @@ if 'grain10_data' in st.session_state:
                 
                 plt.tight_layout()
                 st.pyplot(fig)
+    else:
+        st.error("❌ Не удалось подобрать показатель степени n. Проверьте данные.")
 
     # УНИВЕРСАЛЬНАЯ МОДЕЛЬ С УЧЕТОМ ОБОИХ ТЕМПЕРАТУРНЫХ ОГРАНИЧЕНИЙ
     st.header("3. 🔬 Универсальная модель для всех температур")
@@ -632,8 +705,10 @@ if 'grain10_data' in st.session_state:
     - **Рабочий диапазон:** {min_temperature}°C - {dissolution_temperature}°C
     """)
     
-    if 'best_n' in st.session_state and st.session_state.best_n is not None:
-        best_n = st.session_state.best_n
+    if 'current_best_n' in st.session_state and st.session_state.current_best_n is not None:
+        best_n = st.session_state.current_best_n
+        current_grain = st.session_state.get('current_grain', target_grain)
+        grain_key = f"grain_{current_grain}"
         
         # Подбор универсальной модели для диаметра
         st.subheader("Универсальная модель роста диаметра")
@@ -657,16 +732,17 @@ if 'grain10_data' in st.session_state:
         
         # Подбор параметров универсальной модели
         universal_diameter_params, universal_diameter_cov = fit_universal_diameter_model(
-            df_grain10, best_n, initial_diameter, min_temperature, dissolution_temperature
+            df_grain, best_n, initial_diameter, min_temperature, dissolution_temperature
         )
         
         if universal_diameter_params is not None:
             A_diam, Ea_diam = universal_diameter_params
             
-            # Сохраняем параметры в session_state
-            st.session_state.universal_diameter_params = universal_diameter_params
+            # Сохраняем параметры в session_state с ключом для текущего зерна
+            st.session_state[f'universal_diameter_params_{grain_key}'] = universal_diameter_params
+            st.session_state['current_universal_diameter_params'] = universal_diameter_params
             
-            st.success("✅ Универсальная модель диаметра успешно подобрана!")
+            st.success(f"✅ Универсальная модель диаметра для зерна №{current_grain} успешно подобрана!")
             st.info(f"""
             **Параметры универсальной модели диаметра:**
             - Предэкспоненциальный множитель A = {A_diam:.4e}
@@ -685,8 +761,8 @@ if 'grain10_data' in st.session_state:
             all_predictions_diam = []
             all_actual_diam = []
             
-            for temp in df_grain10['T'].unique():
-                temp_data = df_grain10[df_grain10['T'] == temp]
+            for temp in df_grain['T'].unique():
+                temp_data = df_grain[df_grain['T'] == temp]
                 t_temp = temp_data['t'].values
                 T_temp = np.array([temp] * len(t_temp))
                 
@@ -720,12 +796,12 @@ if 'grain10_data' in st.session_state:
             axes[0].axhline(initial_diameter, color='gray', linestyle=':', alpha=0.7, label=f'Начальный диаметр {initial_diameter} мкм')
             axes[0].set_xlabel('Время (часы)')
             axes[0].set_ylabel('Диаметр (мкм)')
-            axes[0].set_title(f'Универсальная модель диаметра\nT_min = {min_temperature}°C, T_diss = {dissolution_temperature}°C')
+            axes[0].set_title(f'Универсальная модель диаметра для зерна №{current_grain}\nT_min = {min_temperature}°C, T_diss = {dissolution_temperature}°C')
             axes[0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             axes[0].grid(True, alpha=0.3)
             
             # График 2: Качество предсказаний (только для рабочего диапазона)
-            valid_mask = np.array([min_temperature <= T <= dissolution_temperature for T in df_grain10['T'].values])
+            valid_mask = np.array([min_temperature <= T <= dissolution_temperature for T in df_grain['T'].values])
             if len(valid_mask) > 0:
                 valid_actual = np.array(all_actual_diam)[valid_mask[:len(all_actual_diam)]]
                 valid_predictions = np.array(all_predictions_diam)[valid_mask[:len(all_predictions_diam)]]
@@ -737,7 +813,7 @@ if 'grain10_data' in st.session_state:
                     axes[1].plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2)
                     axes[1].set_xlabel('Фактические диаметры (мкм)')
                     axes[1].set_ylabel('Предсказанные диаметры (мкм)')
-                    axes[1].set_title('Качество универсальной модели диаметра\n(только рабочий диапазон)')
+                    axes[1].set_title(f'Качество универсальной модели диаметра\nдля зерна №{current_grain} (только рабочий диапазон)')
                     axes[1].grid(True, alpha=0.3)
                     
                     # Метрики качества (только для валидных температур)
@@ -756,16 +832,19 @@ if 'grain10_data' in st.session_state:
         st.subheader("Универсальная модель содержания фазы (JMAK)")
         
         universal_phase_params, universal_phase_cov = fit_universal_phase_model(
-            df_grain10, min_temperature, dissolution_temperature
+            df_grain, min_temperature, dissolution_temperature
         )
         
         if universal_phase_params is not None:
             A_phase, Ea_phase, n_phase = universal_phase_params
             
-            # Сохраняем параметры в session_state
-            st.session_state.universal_phase_params = universal_phase_params
+            # Сохраняем параметры в session_state с ключом для текущего зерна
+            current_grain = st.session_state.get('current_grain', target_grain)
+            grain_key = f"grain_{current_grain}"
+            st.session_state[f'universal_phase_params_{grain_key}'] = universal_phase_params
+            st.session_state['current_universal_phase_params'] = universal_phase_params
             
-            st.success("✅ Универсальная модель содержания фазы успешно подобрана!")
+            st.success(f"✅ Универсальная модель содержания фазы для зерна №{current_grain} успешно подобрана!")
             st.info(f"""
             **Параметры универсальной модели фазы:**
             - Предэкспоненциальный множитель A = {A_phase:.4e}
@@ -780,8 +859,8 @@ if 'grain10_data' in st.session_state:
             all_predictions_phase = []
             all_actual_phase = []
             
-            for temp in df_grain10['T'].unique():
-                temp_data = df_grain10[df_grain10['T'] == temp]
+            for temp in df_grain['T'].unique():
+                temp_data = df_grain[df_grain['T'] == temp]
                 if len(temp_data) >= 2:
                     t_temp = temp_data['t'].values
                     T_temp = np.array([temp] * len(t_temp))
@@ -820,12 +899,12 @@ if 'grain10_data' in st.session_state:
             axes[0].set_xlabel('Время (часы)')
             axes[0].set_ylabel('Содержание фазы (%)')
             axes[0].set_ylim(0, y_max)
-            axes[0].set_title(f'Универсальная модель содержания фазы\nT_min = {min_temperature}°C, T_diss = {dissolution_temperature}°C')
+            axes[0].set_title(f'Универсальная модель содержания фазы для зерна №{current_grain}\nT_min = {min_temperature}°C, T_diss = {dissolution_temperature}°C')
             axes[0].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
             axes[0].grid(True, alpha=0.3)
             
             # График качества (только для рабочего диапазона)
-            valid_mask_phase = np.array([min_temperature <= T <= dissolution_temperature for T in df_grain10['T'].values])
+            valid_mask_phase = np.array([min_temperature <= T <= dissolution_temperature for T in df_grain['T'].values])
             if len(valid_mask_phase) > 0:
                 valid_actual_phase = np.array(all_actual_phase)[valid_mask_phase[:len(all_actual_phase)]]
                 valid_predictions_phase = np.array(all_predictions_phase)[valid_mask_phase[:len(all_predictions_phase)]]
@@ -848,7 +927,7 @@ if 'grain10_data' in st.session_state:
                     
                     axes[1].set_xlabel('Фактическое содержание фазы (%)')
                     axes[1].set_ylabel('Предсказанное содержание фазы (%)')
-                    axes[1].set_title('Качество универсальной модели фазы\n(только рабочий диапазон)')
+                    axes[1].set_title(f'Качество универсальной модели фазы\nдля зерна №{current_grain} (только рабочий диапазон)')
                     axes[1].legend()
                     axes[1].grid(True, alpha=0.3)
                     
@@ -869,7 +948,7 @@ if 'grain10_data' in st.session_state:
             # Дополнительная информация о диапазоне данных
             if len(valid_actual_phase) > 0:
                 st.info(f"""
-                **📊 Диапазон экспериментальных данных по содержанию фазы:**
+                **📊 Диапазон экспериментальных данных по содержанию фазы для зерна №{current_grain}:**
                 - Минимальное содержание: {min(valid_actual_phase):.2f}%
                 - Максимальное содержание: {max(valid_actual_phase):.2f}%
                 - Среднее содержание: {np.mean(valid_actual_phase):.2f}%
@@ -910,6 +989,7 @@ if 'grain10_data' in st.session_state:
         st.session_state.max_time_interactive = max_time_interactive
     
     if st.button("Построить график", key='plot_interactive'):
+        current_grain = st.session_state.get('current_grain', target_grain)
         if interactive_temp < min_temperature:
             st.warning(f"⚠️ Температура {interactive_temp}°C ниже минимальной {min_temperature}°C")
             st.info("При этой температуре процесс не происходит. Все параметры остаются на начальных значениях.")
@@ -917,12 +997,12 @@ if 'grain10_data' in st.session_state:
             st.warning(f"⚠️ Температура {interactive_temp}°C выше температуры растворения {dissolution_temperature}°C")
             st.info("При этой температуре σ-фаза растворяется. Все параметры остаются на начальных значениях.")
         else:
-            st.success(f"✅ Строим график для температуры {interactive_temp}°C")
+            st.success(f"✅ Строим график для температуры {interactive_temp}°C (зерно №{current_grain})")
             
             # Получаем параметры моделей из session_state
-            universal_diameter_params = st.session_state.get('universal_diameter_params')
-            universal_phase_params = st.session_state.get('universal_phase_params')
-            best_n = st.session_state.get('best_n')
+            universal_diameter_params = st.session_state.get('current_universal_diameter_params')
+            universal_phase_params = st.session_state.get('current_universal_phase_params')
+            best_n = st.session_state.get('current_best_n')
             
             # Строим график
             fig = plot_interactive_model(
@@ -940,7 +1020,7 @@ if 'grain10_data' in st.session_state:
                     initial_diameter, min_temperature, dissolution_temperature
                 )
                 st.info(f"""
-                **📊 Прогноз для {interactive_temp}°C за {max_time_interactive:,.0f} часов:**
+                **📊 Прогноз для зерна №{current_grain} при {interactive_temp}°C за {max_time_interactive:,.0f} часов:**
                 - Начальный диаметр: {initial_diameter} мкм
                 - Конечный диаметр: {final_diameter:.2f} мкм
                 - Общий рост: {final_diameter - initial_diameter:.2f} мкм
@@ -954,7 +1034,7 @@ if 'grain10_data' in st.session_state:
                     min_temperature, dissolution_temperature
                 )
                 st.info(f"""
-                **📊 Прогноз для {interactive_temp}°C за {max_time_interactive:,.0f} часов:**
+                **📊 Прогноз для зерна №{current_grain} при {interactive_temp}°C за {max_time_interactive:,.0f} часов:**
                 - Конечное содержание фазы: {final_phase:.2f}%
                 - Максимально возможное: 100%
                 - Достигнуто: {final_phase:.1f}% от максимального
@@ -997,6 +1077,7 @@ if 'grain10_data' in st.session_state:
             st.session_state.calc_mode = calc_mode
         
         if st.button("Рассчитать прогноз", key='calculate_forecast'):
+            current_grain = st.session_state.get('current_grain', target_grain)
             if target_temp < min_temperature:
                 st.warning(f"⚠️ Температура {target_temp}°C ниже минимальной {min_temperature}°C")
                 st.info(f"**При {target_temp}°C процесс не происходит:**")
@@ -1015,9 +1096,9 @@ if 'grain10_data' in st.session_state:
                 st.success(f"✅ Температура {target_temp}°C в рабочем диапазоне {min_temperature}°C - {dissolution_temperature}°C")
                 
                 # Получаем параметры моделей из session_state
-                universal_diameter_params = st.session_state.get('universal_diameter_params')
-                universal_phase_params = st.session_state.get('universal_phase_params')
-                best_n = st.session_state.get('best_n')
+                universal_diameter_params = st.session_state.get('current_universal_diameter_params')
+                universal_phase_params = st.session_state.get('current_universal_phase_params')
+                best_n = st.session_state.get('current_best_n')
                 
                 if calc_mode in ["Диаметр", "Оба параметра"] and universal_diameter_params is not None and best_n is not None:
                     A_diam, Ea_diam = universal_diameter_params
@@ -1025,7 +1106,7 @@ if 'grain10_data' in st.session_state:
                         target_time, target_temp, A_diam, Ea_diam, best_n, initial_diameter, 
                         min_temperature, dissolution_temperature
                     )
-                    st.success(f"**Прогнозируемый диаметр:** {predicted_diameter:.2f} мкм")
+                    st.success(f"**Прогнозируемый диаметр для зерна №{current_grain}:** {predicted_diameter:.2f} мкм")
                     st.info(f"Рост от начального {initial_diameter} мкм до {predicted_diameter:.2f} мкм")
                 
                 if calc_mode in ["Содержание фазы", "Оба параметра"] and universal_phase_params is not None:
@@ -1034,7 +1115,7 @@ if 'grain10_data' in st.session_state:
                         target_time, target_temp, A_phase, Ea_phase, n_phase, 
                         min_temperature, dissolution_temperature
                     )
-                    st.success(f"**Прогнозируемое содержание фазы:** {predicted_phase:.1f}%")
+                    st.success(f"**Прогнозируемое содержание фазы для зерна №{current_grain}:** {predicted_phase:.1f}%")
                     
                 if universal_diameter_params is None and universal_phase_params is None:
                     st.error("❌ Модели не были рассчитаны. Сначала выполните анализ данных.")
@@ -1064,6 +1145,7 @@ if 'grain10_data' in st.session_state:
             st.session_state.temp_mode = temp_mode
         
         if st.button("Найти температуру", key='find_temperature'):
+            current_grain = st.session_state.get('current_grain', target_grain)
             # Минимальная температура для поиска - в рабочем диапазоне
             search_min = max(400, min_temperature)
             search_max = min(1200, dissolution_temperature)
@@ -1071,9 +1153,9 @@ if 'grain10_data' in st.session_state:
             if search_min >= search_max:
                 st.error("❌ Рабочий диапазон температур пуст. Проверьте настройки T_min и T_diss.")
             else:
-                universal_diameter_params = st.session_state.get('universal_diameter_params')
-                universal_phase_params = st.session_state.get('universal_phase_params')
-                best_n = st.session_state.get('best_n')
+                universal_diameter_params = st.session_state.get('current_universal_diameter_params')
+                universal_phase_params = st.session_state.get('current_universal_phase_params')
+                best_n = st.session_state.get('current_best_n')
                 
                 if temp_mode == "Диаметр (мкм)" and universal_diameter_params is not None and best_n is not None:
                     A_diam, Ea_diam = universal_diameter_params
@@ -1091,7 +1173,7 @@ if 'grain10_data' in st.session_state:
                     optimal_temp = T_candidates[idx_min]
                     
                     if np.abs(differences[idx_min]) < 0.1:  # Допустимая погрешность
-                        st.success(f"**Необходимая температура:** {optimal_temp:.1f}°C")
+                        st.success(f"**Необходимая температура для зерна №{current_grain}:** {optimal_temp:.1f}°C")
                         st.info(f"При {optimal_temp:.1f}°C за {target_time_temp} часов диаметр достигнет {target_value} мкм")
                     else:
                         st.warning("Не удалось найти точное решение в рабочем диапазоне температур")
@@ -1111,7 +1193,7 @@ if 'grain10_data' in st.session_state:
                     optimal_temp = T_candidates[idx_min]
                     
                     if np.abs(differences[idx_min]) < 1.0:  # Допустимая погрешность 1%
-                        st.success(f"**Необходимая температура:** {optimal_temp:.1f}°C")
+                        st.success(f"**Необходимая температура для зерна №{current_grain}:** {optimal_temp:.1f}°C")
                         st.info(f"При {optimal_temp:.1f}°C за {target_time_temp} часов содержание фазы достигнет {target_value}%")
                     else:
                         st.warning("Не удалось найти точное решение в рабочем диапазоне температур")
@@ -1145,4 +1227,17 @@ st.markdown(f"""
 - 🔴 Красные крестики: T < {min_temperature}°C (процесс не идет)
 - 🔵 Синие кружки: рабочий диапазон (нормальный рост)
 - 🟠 Оранжевые треугольники: T > {dissolution_temperature}°C (растворение)
+
+**Поддержка нескольких зерен:**
+- Анализ доступен для зерен №8, №9 и №10
+- Параметры моделей сохраняются отдельно для каждого зерна
+- Можно сравнивать поведение разных зерен
 """)
+
+# Информация об установке зависимостей в конце
+st.sidebar.header("Установка зависимостей")
+st.sidebar.markdown("""
+Если возникают ошибки, установите:
+
+```bash
+pip install streamlit pandas numpy matplotlib scipy seaborn scikit-learn openpyxl xlrd

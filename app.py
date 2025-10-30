@@ -750,10 +750,10 @@ if 'grain_data' in st.session_state:
         - **Качество**: оценка на основе R2_original
         """)
         
-     # Сохраняем best_n в session_state с ключом для текущего зерна
-grain_key = f"grain_{current_grain}"
-st.session_state[f'best_n_{grain_key}'] = best_n
-st.session_state['current_best_n'] = best_n
+            # Сохраняем best_n в session_state с ключом для текущего зерна
+        grain_key = f"grain_{current_grain}"
+        st.session_state[f'best_n_{grain_key}'] = best_n
+        st.session_state['current_best_n'] = best_n
         
         # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
         st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")
@@ -821,7 +821,7 @@ st.session_state['current_best_n'] = best_n
             st.pyplot(fig)
     else:
         st.error("❌ Не удалось подобрать показатель степени n. Проверьте данные.")
-
+        
     # УНИВЕРСАЛЬНАЯ МОДЕЛЬ С УЧЕТОМ ОБОИХ ТЕМПЕРАТУРНЫХ ОГРАНИЧЕНИЙ
     st.header("3. 🔬 Универсальная модель для всех температур")
     

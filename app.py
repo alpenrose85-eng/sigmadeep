@@ -588,17 +588,15 @@ if uploaded_file is not None:
             
         else:
             st.error(f"❌ В данных нет записей для зерна '{target_grain}'")
-        else:
-            missing = [col for col in required_cols if col not in df.columns]
-            st.error(f"❌ Отсутствуют необходимые колонки: {missing}")
-            st.info("""
-            **Требуемые колонки:**
-            - `G` - номер/обозначение зерна (может быть числом или текстом)
-            - `T` - температура (°C)
-            - `t` - время (часы)
-            - `d` - диаметр (мкм)
-            - `f` - содержание фазы (%)
-            """)
+    else:
+        missing = [col for col in required_cols if col not in df.columns]
+        st.error(f"❌ Отсутствуют обязательные колонки: {missing}")
+        st.info("""
+        **Обязательные колонки:**
+        - `G` - номер/обозначение зерна
+        - `T` - температура (°C)
+        - `t` - время (часы)
+        """)
 
 # Основной расчет
 if 'grain_data' in st.session_state:

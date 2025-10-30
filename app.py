@@ -1233,11 +1233,3 @@ st.markdown(f"""
 - Параметры моделей сохраняются отдельно для каждого зерна
 - Можно сравнивать поведение разных зерен
 """)
-
-# Информация об установке зависимостей в конце
-st.sidebar.header("Установка зависимостей")
-st.sidebar.markdown("""
-Если возникают ошибки, установите:
-
-```bash
-pip install streamlit pandas numpy matplotlib scipy seaborn scikit-learn openpyxl xlrd

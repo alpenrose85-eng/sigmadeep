@@ -541,6 +541,11 @@ if uploaded_file is not None:
         # Фильтруем данные по выбранному зерну
         df_selected_grain = df[df['G'] == target_grain].copy()
         
+        # Преобразуем числовые колонки, если нужно
+        if has_phase_data:
+            # Заменяем запятые на точки и преобразуем в числа
+            df_selected_grain['f'] = df_selected_grain['f'].astype(str).str.replace(',', '.').astype(float)
+        
         if len(df_selected_grain) > 0:
             st.session_state['grain_data'] = df_selected_grain
             st.session_state['current_grain'] = target_grain
@@ -579,7 +584,8 @@ if uploaded_file is not None:
                     st.metric("Данные диаметра", "❌ Отсутствуют")
             with col4:
                 if has_phase_data:
-                    valid_phase_data = df_selected_grain[(df_selected_grain['f'] >= 0) & (df_selected_grain['f'] <= 100)]
+                    # Считаем все точки с фазой, даже если значение 0
+                    valid_phase_data = df_selected_grain[pd.notna(df_selected_grain['f'])]
                     st.metric("Точек с фазой", f"{len(valid_phase_data)}")
                 else:
                     st.metric("Данные фазы", "❌ Отсутствуют")
@@ -605,17 +611,22 @@ if 'grain_data' in st.session_state:
     has_diameter_data = st.session_state.get('has_diameter_data', False)
     has_phase_data = st.session_state.get('has_phase_data', False)
     
-    # Фильтрация аномальных данных
+    # Фильтрация аномальных данных - ИСПРАВЛЕННАЯ ЛОГИКА
+    df_grain_clean = df_grain.copy()
+    
     if has_diameter_data:
-        df_grain_clean = df_grain[(df_grain['d'] > 0)].copy()
-    else:
-        df_grain_clean = df_grain.copy()
+        # Фильтруем только точки с положительным диаметром
+        diameter_mask = df_grain_clean['d'] > 0
+        df_grain_clean = df_grain_clean[diameter_mask]
     
     if has_phase_data:
-        df_grain_clean = df_grain_clean[(df_grain_clean['f'] >= 0) & (df_grain_clean['f'] <= 100)]
+        # Фильтруем только точки с корректным содержанием фазы
+        phase_mask = (df_grain_clean['f'] >= 0) & (df_grain_clean['f'] <= 100)
+        df_grain_clean = df_grain_clean[phase_mask]
     
     if len(df_grain_clean) < len(df_grain):
-        st.warning(f"⚠️ Удалено {len(df_grain) - len(df_grain_clean)} аномальных точек")
+        removed_count = len(df_grain) - len(df_grain_clean)
+        st.warning(f"⚠️ Удалено {removed_count} аномальных точек")
         df_grain = df_grain_clean
     
     if len(df_grain) == 0:

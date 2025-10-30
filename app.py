@@ -559,68 +559,73 @@ if 'grain_data' in st.session_state:
     n_results = {}
     available_temperatures = set()
     
-    for n in n_candidates:
-        k_values = []
-        valid_temperatures = 0
-        total_r2 = 0
-        
-        for temp in df_grain['T'].unique():
-            # Пропускаем температуры вне рабочего диапазона
-            if temp < min_temperature or temp > dissolution_temperature:
-                continue
-                
-            temp_data = df_grain[df_grain['T'] == temp]
+       for n in n_candidates:
+            k_values = []
+            valid_temperatures = 0
+            total_r2 = 0
             
-            if len(temp_data) >= 2:
-                d_transformed = temp_data['d']**n - initial_diameter**n
-                
-                if (d_transformed < 0).any():
+            for temp in df_grain['T'].unique():
+                # Пропускаем температуры вне рабочего диапазона
+                if temp < min_temperature or temp > dissolution_temperature:
                     continue
-                
-                try:
-                    slope, intercept, r_value, p_value, std_err = stats.linregress(
-                        temp_data['t'], d_transformed
-                    )
                     
-                    if slope > 0:
-                        d_pred_transformed = slope * temp_data['t'] + intercept
-                        d_pred = (d_pred_transformed + initial_diameter**n)**(1/n)
+                temp_data = df_grain[df_grain['T'] == temp]
+                
+                if len(temp_data) >= 2:
+                    d_transformed = temp_data['d']**n - initial_diameter**n
+                    
+                    if (d_transformed < 0).any():
+                        continue
+                    
+                    try:
+                        slope, intercept, r_value, p_value, std_err = stats.linregress(
+                            temp_data['t'], d_transformed
+                        )
                         
-                        if (d_pred > 0).all() and not np.isnan(r_value**2):
-                            r2 = r_value**2
-                            # Учитываем только положительные R²
-                            if r2 > 0:
-                                valid_temperatures += 1
-                                total_r2 += r2
+                        if slope > 0:
+                            d_pred_transformed = slope * temp_data['t'] + intercept
+                            d_pred = (d_pred_transformed + initial_diameter**n)**(1/n)
                             
-                            metrics = calculate_comprehensive_metrics(temp_data['d'].values, d_pred)
-                            
-                            k_values.append({
-                                'T': temp, 'T_K': temp + 273.15, 'K': slope,
-                                'R2': r2, 'std_err': std_err,
-                                'n_points': len(temp_data), 'metrics': metrics
-                            })
-                            available_temperatures.add(temp)
-                except:
-                    continue
-        
-        if k_values and valid_temperatures > 0:
-            k_df = pd.DataFrame(k_values)
-            # Средний R² только по положительным значениям
-            overall_r2 = total_r2 / valid_temperatures if valid_temperatures > 0 else 0
+                            if (d_pred > 0).all():
+                                # РАСЧЕТ R² ДЛЯ ИСХОДНЫХ ДАННЫХ (диаметр vs время)
+                                r2_original = r2_score(temp_data['d'].values, d_pred)
+                                
+                                # Учитываем только разумные R² (не слишком отрицательные)
+                                if r2_original > -100:  # Фильтруем аномально низкие значения
+                                    valid_temperatures += 1
+                                    total_r2 += r2_original
+                                
+                                metrics = calculate_comprehensive_metrics(temp_data['d'].values, d_pred)
+                                
+                                k_values.append({
+                                    'T': temp, 'T_K': temp + 273.15, 'K': slope,
+                                    'R2_linear': r_value**2,  # R² для линейной регрессии преобразованных данных
+                                    'R2_original': r2_original,  # R² для исходных данных
+                                    'std_err': std_err,
+                                    'n_points': len(temp_data), 
+                                    'metrics': metrics
+                                })
+                                available_temperatures.add(temp)
+                    except Exception as e:
+                        continue
             
-            # Дополнительный критерий: количество температур с хорошим R² (>0.8)
-            good_fit_count = len([r for r in k_df['R2'] if r > 0.8])
-            
-            n_results[n] = {
-                'k_df': k_df, 
-                'mean_R2': overall_r2,
-                'min_R2': k_df['R2'].min(), 
-                'max_R2': k_df['R2'].max(),
-                'n_temperatures': len(k_df),
-                'good_fit_count': good_fit_count,
-                'valid_temperatures': valid_temperatures
-            }
+            if k_values and valid_temperatures > 0:
+                k_df = pd.DataFrame(k_values)
+                # Средний R² только по исходным данным
+                overall_r2 = total_r2 / valid_temperatures if valid_temperatures > 0 else 0
+                
+                # Дополнительный критерий: количество температур с хорошим R² (>0.8)
+                good_fit_count = len([r for r in k_df['R2_original'] if r > 0.8])
+                
+                n_results[n] = {
+                    'k_df': k_df, 
+                    'mean_R2': overall_r2,
+                    'min_R2': k_df['R2_original'].min(), 
+                    'max_R2': k_df['R2_original'].max(),
+                    'n_temperatures': len(k_df),
+                    'good_fit_count': good_fit_count,
+                    'valid_temperatures': valid_temperatures
+                }
     
     # Визуализация подбора n
     if n_results:
@@ -674,17 +679,25 @@ if 'grain_data' in st.session_state:
         - Температур с R² > 0.8: {best_results['good_fit_count']}
         """)
         
-        # Показываем таблицу с R² для каждой температуры
+             # Показываем таблицу с R² для каждой температуры
         st.subheader(f"Качество модели для n = {best_n:.1f} по температурам")
-        display_df = best_k_df[['T', 'R2', 'n_points']].copy()
-        display_df['R2'] = display_df['R2'].round(3)
-        display_df['Качество'] = display_df['R2'].apply(
+        display_df = best_k_df[['T', 'R2_original', 'R2_linear', 'n_points']].copy()
+        display_df['R2_original'] = display_df['R2_original'].round(3)
+        display_df['R2_linear'] = display_df['R2_linear'].round(3)
+        display_df['Качество'] = display_df['R2_original'].apply(
             lambda x: '✅ Отличное' if x > 0.9 else 
                      '🟢 Хорошее' if x > 0.8 else 
                      '🟡 Удовлетворительное' if x > 0.6 else 
                      '🔴 Плохое' if x > 0 else '⚫ Очень плохое'
         )
         st.dataframe(display_df)
+        
+        st.info("""
+        **Пояснение к таблице:**
+        - **R2_original**: R² для исходных данных (диаметр vs время) - основной критерий качества
+        - **R2_linear**: R² для линейной регрессии преобразованных данных (dⁿ - d₀ⁿ vs время)
+        - **Качество**: оценка на основе R2_original
+        """)
         
         # Сохраняем best_n в session_state с ключом для текущего зерна
         grain_key = f"grain_{current_grain}"
@@ -723,22 +736,22 @@ if 'grain_data' in st.session_state:
                     temp_k_data = best_k_df[best_k_df['T'] == temp]
                     if len(temp_k_data) > 0:
                         k_value = temp_k_data['K'].iloc[0]
-                        r2_value = temp_k_data['R2'].iloc[0]
+                        r2_original = temp_k_data['R2_original'].iloc[0]  # Используем R2_original
                         
                         # Расчет предсказаний
                         t_range = np.linspace(temp_data['t'].min(), temp_data['t'].max() * 1.2, 100)
                         d_pred_range = (k_value * t_range + initial_diameter**best_n)**(1/best_n)
                         
                         # Убедимся, что предсказания положительные
-                        d_pred_range = np.maximum(d_pred_range, 0.1)  # Минимальный диаметр 0.1 мкм
+                        d_pred_range = np.maximum(d_pred_range, 0.1)
                         
                         d_pred_points = (k_value * temp_data['t'] + initial_diameter**best_n)**(1/best_n)
                         d_pred_points = np.maximum(d_pred_points, 0.1)
                         
-                        safe_plot_with_diagnostics(
+                     safe_plot_with_diagnostics(
                             ax, temp_data['t'].values, temp_data['d'].values, d_pred_points,
                             t_range, d_pred_range, 
-                            title=f'{temp}°C (R² = {r2_value:.3f})',
+                            title=f'{temp}°C (R² = {r2_original:.3f})',  # Используем r2_original
                             ylabel='Диаметр (мкм)',
                             model_name=f'Модель (n={best_n:.1f})'
                         )

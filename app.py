@@ -582,14 +582,16 @@ if uploaded_file is not None:
                 st.metric("Всего точек", f"{len(df_selected_grain)}")
             with col3:
                 if has_diameter_data:
-                    valid_diameter_data = df_selected_grain[df_selected_grain['d'].notna()]
-                    st.metric("Точек с диаметром", f"{len(valid_diameter_data)}")
+                    # Просто считаем все точки с диаметром
+                    diameter_points = len(df_selected_grain[df_selected_grain['d'].notna()])
+                    st.metric("Точек с диаметром", f"{diameter_points}")
                 else:
                     st.metric("Данные диаметра", "❌ Отсутствуют")
             with col4:
                 if has_phase_data:
-                    valid_phase_data = df_selected_grain[df_selected_grain['f'].notna()]
-                    st.metric("Точек с фазой", f"{len(valid_phase_data)}")
+                    # Просто считаем все точки с фазой
+                    phase_points = len(df_selected_grain[df_selected_grain['f'].notna()])
+                    st.metric("Точек с фазой", f"{phase_points}")
                 else:
                     st.metric("Данные фазы", "❌ Отсутствуют")
             
@@ -614,64 +616,59 @@ if 'grain_data' in st.session_state:
     has_diameter_data = st.session_state.get('has_diameter_data', False)
     has_phase_data = st.session_state.get('has_phase_data', False)
     
-    # ФИЛЬТРАЦИЯ ДАННЫХ - НОВАЯ ЛОГИКА
+    # УПРОЩЕННАЯ ФИЛЬТРАЦИЯ - ОСНОВНОЙ ФИКС
     df_grain_clean = df_grain.copy()
-    removed_count = 0
     
-    # Фильтрация диаметров (только если есть данные о диаметрах)
-    if has_diameter_data:
-        diameter_mask = (df_grain_clean['d'] > 0) & (df_grain_clean['d'].notna())
-        removed_diameter = len(df_grain_clean) - diameter_mask.sum()
-        if removed_diameter > 0:
-            df_grain_clean = df_grain_clean[diameter_mask]
-            removed_count += removed_diameter
-            st.info(f"📏 Удалено {removed_diameter} точек с некорректными диаметрами")
-    
-    # Фильтрация фазы (только если есть данные о фазе)
-    if has_phase_data:
-        # Преобразуем фазу в числовой формат, если нужно
-        if df_grain_clean['f'].dtype == 'object':
+    # Преобразуем фазу в числовой формат, если нужно
+    if has_phase_data and df_grain_clean['f'].dtype == 'object':
+        try:
             df_grain_clean['f'] = df_grain_clean['f'].astype(str).str.replace(',', '.').astype(float)
-        
-        phase_mask = (df_grain_clean['f'] >= 0) & (df_grain_clean['f'] <= 100) & (df_grain_clean['f'].notna())
-        removed_phase = len(df_grain_clean) - phase_mask.sum()
-        if removed_phase > 0:
-            df_grain_clean = df_grain_clean[phase_mask]
-            removed_count += removed_phase
-            st.info(f"🔬 Удалено {removed_phase} точек с некорректным содержанием фазы")
+            st.success("✅ Данные фазы преобразованы в числовой формат")
+        except Exception as e:
+            st.error(f"❌ Ошибка преобразования данных фазы: {e}")
     
-    # Обязательная проверка: должны остаться данные по температуре и времени
-    time_temp_mask = (df_grain_clean['T'].notna()) & (df_grain_clean['t'].notna()) & (df_grain_clean['t'] > 0)
-    removed_time_temp = len(df_grain_clean) - time_temp_mask.sum()
-    if removed_time_temp > 0:
-        df_grain_clean = df_grain_clean[time_temp_mask]
-        removed_count += removed_time_temp
-        st.info(f"⏰ Удалено {removed_time_temp} точек с некорректным временем или температурой")
+    # Преобразуем диаметры в числовой формат, если нужно
+    if has_diameter_data and df_grain_clean['d'].dtype == 'object':
+        try:
+            df_grain_clean['d'] = df_grain_clean['d'].astype(str).str.replace(',', '.').astype(float)
+            st.success("✅ Данные диаметра преобразованы в числовой формат")
+        except Exception as e:
+            st.error(f"❌ Ошибка преобразования данных диаметра: {e}")
     
-    # Обновляем основной датафрейм
+    # ФИЛЬТРАЦИЯ: удаляем только точки с проблемами во времени или температуре
+    initial_count = len(df_grain_clean)
+    
+    # Обязательная проверка: корректные время и температура
+    mask = (df_grain_clean['T'].notna()) & (df_grain_clean['t'].notna()) & (df_grain_clean['t'] >= 0)
+    df_grain_clean = df_grain_clean[mask]
+    
+    removed_count = initial_count - len(df_grain_clean)
+    
     if removed_count > 0:
-        st.warning(f"⚠️ Всего удалено {removed_count} аномальных точек")
+        st.warning(f"⚠️ Удалено {removed_count} точек с некорректным временем или температурой")
         df_grain = df_grain_clean
     
     # Проверяем, остались ли данные для анализа
     if len(df_grain) == 0:
-        st.error("❌ После фильтрации не осталось валидных данных")
-        # Показываем, какие данные были изначально
-        st.info(f"Исходные данные: {len(st.session_state['grain_data'])} точек")
-        if has_diameter_data:
-            st.info(f"- Точек с диаметром: {len(st.session_state['grain_data'][st.session_state['grain_data']['d'].notna()])}")
-        if has_phase_data:
-            st.info(f"- Точек с фазой: {len(st.session_state['grain_data'][st.session_state['grain_data']['f'].notna()])}")
+        st.error("❌ Нет данных с корректным временем и температурой")
         st.stop()
     
-    # Показываем итоговую статистику после фильтрации
-    st.success(f"✅ После фильтрации осталось {len(df_grain)} валидных точек")
+    # Показываем итоговую статистику
+    st.success(f"✅ Для анализа доступно {len(df_grain)} точек")
+    
     if has_diameter_data:
-        valid_diameter = len(df_grain[df_grain['d'].notna()])
-        st.info(f"📏 Точек с диаметром: {valid_diameter}")
+        diameter_points = len(df_grain[df_grain['d'].notna() & (df_grain['d'] > 0)])
+        st.info(f"📏 Точек с диаметром: {diameter_points}")
+    
     if has_phase_data:
-        valid_phase = len(df_grain[df_grain['f'].notna()])
-        st.info(f"🔬 Точек с фазой: {valid_phase}")
+        phase_points = len(df_grain[df_grain['f'].notna()])
+        st.info(f"🔬 Точек с фазой: {phase_points}")
+        
+        # Показываем диапазон содержания фазы
+        if phase_points > 0:
+            min_f = df_grain['f'].min()
+            max_f = df_grain['f'].max()
+            st.info(f"📊 Содержание фазы: от {min_f:.1f}% до {max_f:.1f}%")
     
     df_grain['T_K'] = df_grain['T'] + 273.15
     

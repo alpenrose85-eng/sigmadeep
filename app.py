@@ -66,7 +66,7 @@ with col4:
                                            value=900.0, min_value=0.0, step=10.0,
                                            help="Температура, выше которой σ-фаза растворяется")
 
-target_grain = 9
+target_grain = 8
 
 # Инициализация session_state для калькулятора
 if 'calc_type' not in st.session_state:
@@ -638,16 +638,16 @@ if 'grain10_data' in st.session_state:
         # Подбор универсальной модели для диаметра
         st.subheader("Универсальная модель роста диаметра")
         
-        with st.expander("💡 Объяснение универсальной модели"):
-            st.markdown(f"""
+      with st.expander("💡 Объяснение универсальной модели"):
+            st.markdown(rf"""
             **Универсальная модель диаметра:**
-            $$ d(t,T) = \\left[ k_{{eff}}(T) \\cdot t + d_0^n \\right]^{{1/n}} $$
+            $$ d(t,T) = \left[ k_{{eff}}(T) \cdot t + d_0^n \right]^{{1/n}} $$
             
-            $$ k_{{eff}}(T) = \\begin{{cases}}
-            0 & \\text{{если }} T < {min_temperature}°C \\\\
-            A \\cdot \\exp\\left(-\\frac{{E_a}}{{RT}}\\right) & \\text{{если }} {min_temperature}°C \\leq T \\leq {dissolution_temperature}°C \\\\
-            0 & \\text{{если }} T > {dissolution_temperature}°C
-            \\end{{cases}} $$
+            $$ k_{{eff}}(T) = \begin{{cases}}
+            0 & \text{{если }} T < {min_temperature}°C \\
+            A \cdot \exp\left(-\frac{{E_a}}{{RT}}\right) & \text{{если }} {min_temperature}°C \leq T \leq {dissolution_temperature}°C \\
+            0 & \text{{если }} T > {dissolution_temperature}°C
+            \end{{cases}} $$
             
             **Физический смысл:**
             - При T < {min_temperature}°C: превращение не начинается

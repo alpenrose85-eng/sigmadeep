@@ -66,7 +66,7 @@ with col4:
                                            value=900.0, min_value=0.0, step=10.0,
                                            help="Температура, выше которой σ-фаза растворяется")
 
-target_grain = 10
+target_grain = 9
 
 # Инициализация session_state для калькулятора
 if 'calc_type' not in st.session_state:

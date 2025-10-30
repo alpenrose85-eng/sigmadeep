@@ -73,7 +73,7 @@ st.subheader("Параметры анализа:")
 col1, col2, col3, col4, col5 = st.columns(5)
 with col1:
     # Получаем список доступных зерен из данных, если файл загружен
-    available_grains = [8, 9, 10]  # значения по умолчанию
+    available_grains = ["8", "9", "10"]  # значения по умолчанию как строки
     
     if uploaded_file is not None:
         try:
@@ -84,8 +84,8 @@ with col1:
                 preview_df = pd.read_excel(uploaded_file)
             
             if 'G' in preview_df.columns:
-                available_grains = sorted(preview_df['G'].unique())
-                available_grains = [int(g) for g in available_grains if pd.notna(g)]
+                # Преобразуем все значения в строки для единообразия
+                available_grains = sorted([str(g) for g in preview_df['G'].unique() if pd.notna(g)])
         except:
             pass
     
@@ -99,19 +99,16 @@ with col1:
     
     if grain_input_method == "Из списка":
         target_grain = st.selectbox(
-            "Номер зерна из списка", 
+            "Обозначение зерна из списка", 
             options=available_grains,
             index=min(2, len(available_grains)-1) if available_grains else 0,
-            help="Выберите номер зерна из доступных в данных"
+            help="Выберите обозначение зерна из доступных в данных"
         )
     else:
-        target_grain = st.number_input(
-            "Номер зерна (вручную)",
-            min_value=1,
-            max_value=100,
-            value=10,
-            step=1,
-            help="Введите номер зерна вручную"
+        target_grain = st.text_input(
+            "Обозначение зерна (вручную)",
+            value="10",
+            help="Введите обозначение зерна (может быть числом или текстом, например: 8, 9, 10, РД1, РД2)"
         )
 
 with col2:
@@ -497,15 +494,20 @@ if uploaded_file is not None:
         required_cols = ['G', 'T', 't', 'd', 'f']
         
         if all(col in df.columns for col in required_cols):
+            # Преобразуем все значения в столбце G в строки для единообразия
+            df['G'] = df['G'].astype(str)
+            
             # Показываем информацию о доступных зернах
             all_grains = sorted(df['G'].unique())
-            all_grains = [int(g) for g in all_grains if pd.notna(g)]
             
             st.info(f"📊 В данных найдены зерна: {', '.join(map(str, all_grains))}")
             
             # Проверяем, существует ли выбранное зерно в данных
             if target_grain not in all_grains:
-                st.warning(f"⚠️ Зерно №{target_grain} не найдено в данных. Доступные зерна: {', '.join(map(str, all_grains))}")
+                st.warning(f"⚠️ Зерно '{target_grain}' не найдено в данных. Доступные зерна: {', '.join(map(str, all_grains))}")
+                # Предлагаем выбрать из доступных
+                if st.button("Выбрать из доступных зерен"):
+                    target_grain = st.selectbox("Выберите зерно из доступных:", options=all_grains)
                 st.stop()
             
             # Фильтруем данные по выбранному зерну
@@ -514,7 +516,7 @@ if uploaded_file is not None:
             if len(df_selected_grain) > 0:
                 st.session_state['grain_data'] = df_selected_grain
                 st.session_state['current_grain'] = target_grain
-                st.success(f"✅ Данные для зерна №{target_grain} успешно загружены! Найдено {len(df_selected_grain)} записей")
+                st.success(f"✅ Данные для зерна '{target_grain}' успешно загружены! Найдено {len(df_selected_grain)} записей")
                 
                 # Проверка температурного диапазона в данных
                 min_temp_in_data = df_selected_grain['T'].min()
@@ -531,7 +533,7 @@ if uploaded_file is not None:
                         st.warning(warning)
                     st.info("Точки вне рабочего диапазона будут исключены из подбора универсальной модели")
                 
-                st.subheader(f"📊 Статистика данных для зерна №{target_grain}:")
+                st.subheader(f"📊 Статистика данных для зерна '{target_grain}':")
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     unique_temps = df_selected_grain['T'].unique()
@@ -546,13 +548,13 @@ if uploaded_file is not None:
                 st.dataframe(df_selected_grain.head(10))
                 
             else:
-                st.error(f"❌ В данных нет записей для зерна №{target_grain}")
+                st.error(f"❌ В данных нет записей для зерна '{target_grain}'")
         else:
             missing = [col for col in required_cols if col not in df.columns]
             st.error(f"❌ Отсутствуют необходимые колонки: {missing}")
             st.info("""
             **Требуемые колонки:**
-            - `G` - номер зерна
+            - `G` - номер/обозначение зерна (может быть числом или текстом)
             - `T` - температура (°C)
             - `t` - время (часы)
             - `d` - диаметр (мкм)
@@ -578,7 +580,7 @@ if 'grain_data' in st.session_state:
     df_grain['T_K'] = df_grain['T'] + 273.15
     
     # Анализ диаметров
-    st.header(f"2. 📏 Анализ диаметров σ-фазы для зерна №{current_grain}")
+    st.header(f"2. 📏 Анализ диаметров σ-фазы для зерна '{current_grain}'")
     
     with st.expander("💡 Объяснение анализа диаметров"):
         st.markdown("""
@@ -748,10 +750,10 @@ if 'grain_data' in st.session_state:
         - **Качество**: оценка на основе R2_original
         """)
         
-        # Сохраняем best_n в session_state с ключом для текущего зерна
-        grain_key = f"grain_{current_grain}"
-        st.session_state[f'best_n_{grain_key}'] = best_n
-        st.session_state['current_best_n'] = best_n
+     # Сохраняем best_n в session_state с ключом для текущего зерна
+grain_key = f"grain_{current_grain}"
+st.session_state[f'best_n_{grain_key}'] = best_n
+st.session_state['current_best_n'] = best_n
         
         # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
         st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")

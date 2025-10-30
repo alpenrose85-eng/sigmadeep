@@ -6,10 +6,24 @@ from scipy.optimize import curve_fit
 from scipy import stats
 import seaborn as sns
 import io
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
-from sklearn.linear_model import LinearRegression
 import warnings
 warnings.filterwarnings('ignore')
+
+# Попытка импорта sklearn с обработкой ошибок
+try:
+    from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+    from sklearn.linear_model import LinearRegression
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    st.error("❌ Библиотека scikit-learn не установлена. Установите её: pip install scikit-learn")
+    SKLEARN_AVAILABLE = False
+    # Создаем заглушки для функций
+    def r2_score(*args, **kwargs):
+        return 0
+    def mean_squared_error(*args, **kwargs):
+        return 0
+    def mean_absolute_error(*args, **kwargs):
+        return 0
 
 # Универсальная газовая постоянная
 R = 8.314  # Дж/(моль·К)
@@ -379,6 +393,7 @@ def plot_interactive_model(temperature, mode, max_time, universal_diameter_param
     plt.tight_layout()
     return fig
 
+# Основной код приложения
 if uploaded_file is not None:
     try:
         if uploaded_file.name.endswith('.csv'):
@@ -538,6 +553,9 @@ if 'grain10_data' in st.session_state:
             
             st.success(f"🎯 Оптимальный показатель: n = {best_n:.1f} (R² = {best_n_row['Средний R²']:.3f})")
             
+            # Сохраняем best_n в session_state
+            st.session_state.best_n = best_n
+            
             # ДИАГНОСТИКА КАЧЕСТВА ПОДБОРА ДЛЯ ЛУЧШЕГО n
             st.subheader(f"Диагностика качества модели для n = {best_n:.1f}")
             
@@ -614,7 +632,9 @@ if 'grain10_data' in st.session_state:
     - **Рабочий диапазон:** {min_temperature}°C - {dissolution_temperature}°C
     """)
     
-    if best_n is not None:
+    if 'best_n' in st.session_state and st.session_state.best_n is not None:
+        best_n = st.session_state.best_n
+        
         # Подбор универсальной модели для диаметра
         st.subheader("Универсальная модель роста диаметра")
         
@@ -643,6 +663,9 @@ if 'grain10_data' in st.session_state:
         if universal_diameter_params is not None:
             A_diam, Ea_diam = universal_diameter_params
             
+            # Сохраняем параметры в session_state
+            st.session_state.universal_diameter_params = universal_diameter_params
+            
             st.success("✅ Универсальная модель диаметра успешно подобрана!")
             st.info(f"""
             **Параметры универсальной модели диаметра:**
@@ -653,7 +676,7 @@ if 'grain10_data' in st.session_state:
             - Рабочий диапазон: {min_temperature}°C - {dissolution_temperature}°C
             """)
             
-            # ВИЗУАЛИЗАЦИЯ УНИВЕРСАЛЬНОЙ МОДЕЛИ ДИАМЕТРА (ВОЗВРАЩАЕМ ОБРАТНО)
+            # ВИЗУАЛИЗАЦИЯ УНИВЕРСАЛЬНОЙ МОДЕЛИ ДИАМЕТРА
             st.subheader("Визуализация универсальной модели диаметра")
             
             fig, axes = plt.subplots(1, 2, figsize=(15, 6))
@@ -739,6 +762,9 @@ if 'grain10_data' in st.session_state:
         if universal_phase_params is not None:
             A_phase, Ea_phase, n_phase = universal_phase_params
             
+            # Сохраняем параметры в session_state
+            st.session_state.universal_phase_params = universal_phase_params
+            
             st.success("✅ Универсальная модель содержания фазы успешно подобрана!")
             st.info(f"""
             **Параметры универсальной модели фазы:**
@@ -748,8 +774,7 @@ if 'grain10_data' in st.session_state:
             - Рабочий диапазон: {min_temperature}°C - {dissolution_temperature}°C
             """)
             
-            # ВИЗУАЛИЗАЦИЯ УНИВЕРСАЛЬНОЙ МОДЕЛИ ФАЗЫ (ВОЗВРАЩАЕМ ОБРАТНО)
-            # Визуализация универсальной модели фазы
+            # ВИЗУАЛИЗАЦИЯ УНИВЕРСАЛЬНОЙ МОДЕЛИ ФАЗЫ
             fig, axes = plt.subplots(1, 2, figsize=(15, 6))
             
             all_predictions_phase = []
@@ -894,7 +919,7 @@ if 'grain10_data' in st.session_state:
         else:
             st.success(f"✅ Строим график для температуры {interactive_temp}°C")
             
-            # Получаем параметры моделей
+            # Получаем параметры моделей из session_state
             universal_diameter_params = st.session_state.get('universal_diameter_params')
             universal_phase_params = st.session_state.get('universal_phase_params')
             best_n = st.session_state.get('best_n')
@@ -989,7 +1014,7 @@ if 'grain10_data' in st.session_state:
             else:
                 st.success(f"✅ Температура {target_temp}°C в рабочем диапазоне {min_temperature}°C - {dissolution_temperature}°C")
                 
-                # Получаем параметры моделей из предыдущих расчетов
+                # Получаем параметры моделей из session_state
                 universal_diameter_params = st.session_state.get('universal_diameter_params')
                 universal_phase_params = st.session_state.get('universal_phase_params')
                 best_n = st.session_state.get('best_n')
@@ -1094,14 +1119,6 @@ if 'grain10_data' in st.session_state:
                 
                 else:
                     st.error("❌ Модели не были рассчитаны. Сначала выполните анализ данных.")
-
-# Сохраняем параметры моделей в session_state для использования в калькуляторе
-if 'grain10_data' in st.session_state and 'best_n' in locals():
-    st.session_state.best_n = best_n
-if 'universal_diameter_params' in locals() and universal_diameter_params is not None:
-    st.session_state.universal_diameter_params = universal_diameter_params
-if 'universal_phase_params' in locals() and universal_phase_params is not None:
-    st.session_state.universal_phase_params = universal_phase_params
 
 st.header("🎯 Рекомендации по использованию моделей")
 

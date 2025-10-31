@@ -1387,7 +1387,7 @@ if 'grain_data' in st.session_state:
             st.error("❌ Не удалось подобрать параметры универсальной модели фазы")
 
   # НОВЫЙ РАЗДЕЛ: МОДЕЛЬ ТЕМПЕРАТУРЫ T = k·(c/t^0.5)^n
-if has_phase_data and enable_temperature_model:
+if 'has_phase_data' in st.session_state and st.session_state.has_phase_data and enable_temperature_model:
     st.header("4. 🌡️ Модель температуры T = k·(c/t^0.5)^n")
     
     # ДИАГНОСТИКА ДАННЫХ

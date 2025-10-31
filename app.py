@@ -333,46 +333,188 @@ def temperature_model(params, c, t):
     c_safe = np.maximum(c, 1e-10)
     return k * (c_safe / np.sqrt(t_safe)) ** n
 
-def fit_temperature_model(df):
-    """Подбор параметров модели температуры T = k·(c/t^0.5)^n"""
+def fit_temperature_model(df, temp_min=590, temp_max=660, time_min=20000, time_max=400000):
+    """Подбор параметров модели температуры T = k·(c/t^0.5)^n с учетом ограничений"""
     try:
-        # Фильтруем данные: должны быть T, c (f), t
-        required_cols = ['T', 'f', 't']
-        if not all(col in df.columns for col in required_cols):
-            return None, None
+        # Фильтруем данные по указанным ограничениям
+        df_filtered = df[
+            (df['T'] >= temp_min) & 
+            (df['T'] <= temp_max) & 
+            (df['t'] >= time_min) & 
+            (df['t'] <= time_max)
+        ].copy()
         
-        df_clean = df.dropna(subset=required_cols).copy()
+        st.info(f"🔍 Для подбора модели используется {len(df_filtered)} точек в диапазоне: "
+               f"T={temp_min}-{temp_max}°C, t={time_min:,}-{time_max:,} часов")
         
-        if len(df_clean) < 3:
+        if len(df_filtered) < 3:
+            st.warning(f"❌ Недостаточно данных в указанном диапазоне ({len(df_filtered)} точек)")
             return None, None
         
         # Преобразуем температуру в Кельвины
-        T_kelvin = df_clean['T'].values + 273.15
-        c_values = df_clean['f'].values
-        t_values = df_clean['t'].values
+        T_kelvin = df_filtered['T'].values + 273.15
+        c_values = df_filtered['f'].values
+        t_values = df_filtered['t'].values
         
-        # Начальные приближения
-        k_guess = 1000  # Примерное начальное значение
-        n_guess = 1.0   # Примерное начальное значение
+        # Улучшенные начальные приближения на основе физических соображений
+        # Для T = k·(c/t^0.5)^n, где T в K, c в %, t в часах
+        k_guess = 800  # Более реалистичное начальное значение
+        n_guess = 0.8  # Более реалистичный показатель
         
         def model_to_fit(x, k, n):
             c, t = x
             return temperature_model([k, n], c, t)
         
-        popt, pcov = curve_fit(
-            model_to_fit,
-            [c_values, t_values],
-            T_kelvin,
-            p0=[k_guess, n_guess],
-            bounds=([1, 0.1], [10000, 5]),
-            maxfev=5000
-        )
+        # Пробуем разные методы оптимизации
+        methods = ['lm', 'trf', 'dogbox']
+        best_params = None
+        best_pcov = None
+        best_error = float('inf')
         
-        return popt, pcov
+        for method in methods:
+            try:
+                popt, pcov = curve_fit(
+                    model_to_fit,
+                    [c_values, t_values],
+                    T_kelvin,
+                    p0=[k_guess, n_guess],
+                    bounds=([100, 0.1], [2000, 3.0]),  # Расширенные границы
+                    method=method,
+                    maxfev=10000  # Увеличиваем количество итераций
+                )
+                
+                # Проверяем качество подбора
+                predictions = temperature_model(popt, c_values, t_values)
+                error = np.mean((predictions - T_kelvin)**2)
+                
+                if error < best_error:
+                    best_error = error
+                    best_params = popt
+                    best_pcov = pcov
+                    
+                st.success(f"✅ Метод {method}: k={popt[0]:.2f}, n={popt[1]:.3f}, ошибка={error:.2f}")
+                
+            except Exception as e:
+                st.warning(f"⚠️ Метод {method} не сработал: {str(e)}")
+                continue
         
+        if best_params is not None:
+            return best_params, best_pcov
+        else:
+            # Если автоматический подбор не сработал, пробуем ручной перебор
+            st.info("🔄 Пробуем ручной перебор параметров...")
+            return manual_parameter_search(df_filtered, temp_min, temp_max)
+            
     except Exception as e:
         st.error(f"Ошибка подбора модели температуры: {str(e)}")
         return None, None
+
+def manual_parameter_search(df, temp_min, temp_max):
+    """Ручной поиск параметров в заданном диапазоне"""
+    T_kelvin = df['T'].values + 273.15
+    c_values = df['f'].values
+    t_values = df['t'].values
+    
+    best_k = None
+    best_n = None
+    best_r2 = -float('inf')
+    
+    # Диапазоны для поиска (основанные на физических соображениях)
+    k_range = np.linspace(500, 1500, 50)
+    n_range = np.linspace(0.5, 2.0, 50)
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    total_iterations = len(k_range) * len(n_range)
+    current_iteration = 0
+    
+    for k in k_range:
+        for n in n_range:
+            current_iteration += 1
+            progress = current_iteration / total_iterations
+            progress_bar.progress(progress)
+            status_text.text(f"Поиск параметров: {current_iteration}/{total_iterations}")
+            
+            try:
+                predictions = temperature_model([k, n], c_values, t_values)
+                r2 = r2_score(T_kelvin, predictions)
+                
+                if r2 > best_r2:
+                    best_r2 = r2
+                    best_k = k
+                    best_n = n
+            except:
+                continue
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    if best_r2 > 0:
+        st.success(f"🎯 Найденные параметры: k={best_k:.2f}, n={best_n:.3f}, R²={best_r2:.3f}")
+        return [best_k, best_n], None
+    else:
+        st.error("❌ Не удалось найти подходящие параметры")
+        return None, None
+
+# ДОБАВЬТЕ эту функцию для диагностики данных:
+def diagnose_temperature_data(df, temp_min=590, temp_max=660, time_min=20000, time_max=400000):
+    """Диагностика данных для модели температуры"""
+    st.subheader("🔍 Диагностика данных для модели температуры")
+    
+    # Фильтруем данные по указанным ограничениям
+    df_filtered = df[
+        (df['T'] >= temp_min) & 
+        (df['T'] <= temp_max) & 
+        (df['t'] >= time_min) & 
+        (df['t'] <= time_max) &
+        (df['f'].notna())
+    ].copy()
+    
+    st.info(f"**Статистика данных в диапазоне T={temp_min}-{temp_max}°C, t={time_min:,}-{time_max:,} часов:**")
+    st.write(f"- Всего точек: {len(df_filtered)}")
+    st.write(f"- Температуры: от {df_filtered['T'].min():.1f} до {df_filtered['T'].max():.1f}°C")
+    st.write(f"- Время: от {df_filtered['t'].min():,} до {df_filtered['t'].max():,} часов")
+    st.write(f"- Содержание фазы: от {df_filtered['f'].min():.2f} до {df_filtered['f'].max():.2f}%")
+    
+    if len(df_filtered) > 0:
+        # Анализ распределения c/√t
+        df_filtered['c_over_sqrt_t'] = df_filtered['f'] / np.sqrt(df_filtered['t'])
+        
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # График 1: Распределение c/√t
+        axes[0].scatter(df_filtered['c_over_sqrt_t'], df_filtered['T'], alpha=0.7)
+        axes[0].set_xlabel('c/√t (%/√час)')
+        axes[0].set_ylabel('Температура (°C)')
+        axes[0].set_title('Распределение данных')
+        axes[0].grid(True, alpha=0.3)
+        
+        # График 2: Зависимость температуры от времени
+        scatter = axes[1].scatter(df_filtered['t'], df_filtered['T'], 
+                                 c=df_filtered['f'], cmap='viridis', alpha=0.7)
+        axes[1].set_xlabel('Время (часы)')
+        axes[1].set_ylabel('Температура (°C)')
+        axes[1].set_title('Температура vs Время (цвет - содержание фазы)')
+        axes[1].grid(True, alpha=0.3)
+        plt.colorbar(scatter, ax=axes[1], label='Содержание фазы (%)')
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        
+        # Анализ корреляции
+        if len(df_filtered) >= 3:
+            correlation = df_filtered['c_over_sqrt_t'].corr(df_filtered['T'])
+            st.write(f"- Корреляция между c/√t и T: {correlation:.3f}")
+            
+            if abs(correlation) < 0.3:
+                st.warning("⚠️ Слабая корреляция между переменными. Модель может плохо подходить.")
+            elif abs(correlation) < 0.6:
+                st.info("📊 Умеренная корреляция между переменными.")
+            else:
+                st.success("✅ Хорошая корреляция между переменными.")
+    
+    return df_filtered
 
 def predict_temperature_from_model(k, n, c, t):
     """Прогноз температуры по модели T = k·(c/t^0.5)^n"""
@@ -1244,72 +1386,96 @@ if 'grain_data' in st.session_state:
         else:
             st.error("❌ Не удалось подобрать параметры универсальной модели фазы")
 
-    # НОВЫЙ РАЗДЕЛ: МОДЕЛЬ ТЕМПЕРАТУРЫ T = k·(c/t^0.5)^n
-    if has_phase_data and enable_temperature_model:
-        st.header("4. 🌡️ Модель температуры T = k·(c/t^0.5)^n")
+  # НОВЫЙ РАЗДЕЛ: МОДЕЛЬ ТЕМПЕРАТУРЫ T = k·(c/t^0.5)^n
+if has_phase_data and enable_temperature_model:
+    st.header("4. 🌡️ Модель температуры T = k·(c/t^0.5)^n")
+    
+    # ДИАГНОСТИКА ДАННЫХ
+    df_diagnosed = diagnose_temperature_data(df_grain, 590, 660, 20000, 400000)
+    
+    if len(df_diagnosed) >= 3:
+        # НАСТРОЙКИ ПОДБОРА ПАРАМЕТРОВ
+        st.subheader("Настройки подбора параметров")
         
-        with st.expander("💡 Объяснение модели температуры"):
-            st.markdown("""
-            **Модель температуры:**
-            $$ T = k \\cdot \\left(\\frac{c}{\\sqrt{t}}\\right)^n $$
-            
-            **Переменные:**
-            - $T$ - температура в Кельвинах
-            - $c$ - содержание σ-фазы в %
-            - $t$ - время в часах
-            - $k, n$ - эмпирические коэффициенты
-            
-            **Физический смысл:**
-            - Модель описывает зависимость температуры от содержания фазы и времени
-            - Параметр $k$ определяет масштаб температуры
-            - Параметр $n$ определяет нелинейность зависимости
-            - Модель полезна для прогнозирования температурных режимов
-            """)
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            custom_temp_min = st.number_input("Мин. температура (°C)", 
+                                            value=590.0, min_value=0.0, step=10.0)
+        with col2:
+            custom_temp_max = st.number_input("Макс. температура (°C)", 
+                                            value=660.0, min_value=0.0, step=10.0)
+        with col3:
+            custom_time_min = st.number_input("Мин. время (часы)", 
+                                           value=20000.0, min_value=0.0, step=1000.0)
+        with col4:
+            custom_time_max = st.number_input("Макс. время (часы)", 
+                                           value=400000.0, min_value=0.0, step=10000.0)
         
-        # Подбор параметров модели температуры
-        temperature_model_params, temperature_model_cov = fit_temperature_model(df_grain)
+        # ДОПОЛНИТЕЛЬНЫЕ НАСТРОЙКИ
+        st.subheader("Дополнительные настройки")
+        col1, col2 = st.columns(2)
+        with col1:
+            use_manual_search = st.checkbox("Использовать расширенный поиск", 
+                                          value=True,
+                                          help="Более тщательный, но медленный поиск параметров")
+        with col2:
+            custom_k_guess = st.number_input("Начальное k", 
+                                           value=800.0, min_value=0.0, step=100.0)
         
-        if temperature_model_params is not None:
-            k_temp, n_temp = temperature_model_params
+        if st.button("Подобрать параметры модели", key='fit_temp_model'):
+            with st.spinner("Подбираем параметры модели..."):
+                # Подбор параметров модели температуры
+                temperature_model_params, temperature_model_cov = fit_temperature_model(
+                    df_grain, custom_temp_min, custom_temp_max, custom_time_min, custom_time_max
+                )
             
-            # Сохраняем параметры в session_state
-            current_grain = st.session_state.get('current_grain', target_grain)
-            grain_key = f"grain_{current_grain}"
-            st.session_state[f'temperature_model_params_{grain_key}'] = temperature_model_params
-            st.session_state['current_temperature_model_params'] = temperature_model_params
-            
-            st.success(f"✅ Модель температуры для зерна №{current_grain} успешно подобрана!")
-            st.info(f"""
-            **Параметры модели температуры:**
-            - Коэффициент k = {k_temp:.2f} K
-            - Показатель степени n = {n_temp:.3f}
-            - Формула: T(K) = {k_temp:.2f}·(c/√t)^{n_temp:.3f}
-            - Формула в °C: T(°C) = {k_temp:.2f}·(c/√t)^{n_temp:.3f} - 273.15
-            """)
-            
-            # ВИЗУАЛИЗАЦИЯ МОДЕЛИ ТЕМПЕРАТУРЫ
-            st.subheader("Визуализация модели температуры")
-            
-            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-            
-            # График 1: Предсказания vs экспериментальные данные
-            all_predictions_temp = []
-            all_actual_temp = []
-            
-            # Вычисляем предсказанные температуры
-            for idx, row in df_grain.iterrows():
-                if pd.notna(row['f']) and pd.notna(row['t']):
-                    T_pred_kelvin = temperature_model([k_temp, n_temp], row['f'], row['t'])
-                    T_pred_celsius = T_pred_kelvin - 273.15
-                    all_predictions_temp.append(T_pred_celsius)
-                    all_actual_temp.append(row['T'])
-            
-            if len(all_actual_temp) > 0:
-                # График рассеяния: предсказанные vs фактические температуры
-                axes[0].scatter(all_actual_temp, all_predictions_temp, alpha=0.6, color='purple')
+            if temperature_model_params is not None:
+                k_temp, n_temp = temperature_model_params
                 
-                min_temp = min(min(all_actual_temp), min(all_predictions_temp))
-                max_temp = max(max(all_actual_temp), max(all_predictions_temp))
+                # Сохраняем параметры в session_state
+                current_grain = st.session_state.get('current_grain', target_grain)
+                grain_key = f"grain_{current_grain}"
+                st.session_state[f'temperature_model_params_{grain_key}'] = temperature_model_params
+                st.session_state['current_temperature_model_params'] = temperature_model_params
+                
+                # РАСЧЕТ КАЧЕСТВА МОДЕЛИ
+                T_kelvin_actual = df_diagnosed['T'].values + 273.15
+                predictions = temperature_model([k_temp, n_temp], 
+                                              df_diagnosed['f'].values, 
+                                              df_diagnosed['t'].values)
+                r2 = r2_score(T_kelvin_actual, predictions)
+                rmse = np.sqrt(mean_squared_error(T_kelvin_actual, predictions))
+                
+                st.success(f"✅ Модель температуры для зерна №{current_grain} успешно подобрана!")
+                st.info(f"""
+                **Параметры модели температуры:**
+                - Коэффициент k = {k_temp:.2f} K
+                - Показатель степени n = {n_temp:.3f}
+                - **Качество модели: R² = {r2:.3f}**
+                - Формула: T(K) = {k_temp:.2f}·(c/√t)^{n_temp:.3f}
+                - Формула в °C: T(°C) = {k_temp:.2f}·(c/√t)^{n_temp:.3f} - 273.15
+                """)
+                
+                if r2 < 0.9:
+                    st.warning("⚠️ Качество модели ниже целевого (R² < 0.9). Попробуйте:")
+                    st.markdown("""
+                    1. Проверить корректность данных
+                    2. Расширить диапазон поиска параметров
+                    3. Увеличить количество точек данных
+                    4. Проверить физическую адекватность модели
+                    """)
+                
+                # ВИЗУАЛИЗАЦИЯ МОДЕЛИ ТЕМПЕРАТУРЫ
+                st.subheader("Визуализация модели температуры")
+                
+                fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+                
+                # График 1: Предсказания vs экспериментальные данные
+                axes[0].scatter(T_kelvin_actual - 273.15, predictions - 273.15, 
+                               alpha=0.6, color='purple')
+                
+                min_temp = min(T_kelvin_actual - 273.15)
+                max_temp = max(T_kelvin_actual - 273.15)
                 margin = (max_temp - min_temp) * 0.1
                 
                 axes[0].plot([min_temp - margin, max_temp + margin], 
@@ -1317,81 +1483,65 @@ if 'grain_data' in st.session_state:
                            'r--', linewidth=2, label='Идеальное согласие')
                 axes[0].set_xlabel('Фактическая температура (°C)')
                 axes[0].set_ylabel('Предсказанная температура (°C)')
-                axes[0].set_title(f'Качество модели температуры для зерна №{current_grain}')
+                axes[0].set_title(f'Качество модели температуры (R² = {r2:.3f})')
                 axes[0].legend()
                 axes[0].grid(True, alpha=0.3)
                 
                 # Метрики качества
-                metrics_temp = calculate_comprehensive_metrics(all_actual_temp, all_predictions_temp)
                 axes[0].text(0.05, 0.95, 
-                            f"R² = {metrics_temp['R²']:.3f}\nRMSE = {metrics_temp['RMSE']:.2f}°C", 
+                            f"R² = {r2:.3f}\nRMSE = {rmse:.2f}°C", 
                             transform=axes[0].transAxes, verticalalignment='top',
                             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
                 
                 # График 2: Зависимость температуры от c/√t
-                c_over_sqrt_t = []
-                T_kelvin_actual = []
+                c_over_sqrt_t = df_diagnosed['f'].values / np.sqrt(df_diagnosed['t'].values)
                 
-                for idx, row in df_grain.iterrows():
-                    if pd.notna(row['f']) and pd.notna(row['t']) and row['t'] > 0:
-                        c_val = row['f']
-                        t_val = row['t']
-                        c_over_sqrt_t.append(c_val / np.sqrt(t_val))
-                        T_kelvin_actual.append(row['T'] + 273.15)
+                # Сортируем для красивого графика
+                sorted_idx = np.argsort(c_over_sqrt_t)
+                c_over_sqrt_t_sorted = c_over_sqrt_t[sorted_idx]
+                T_kelvin_sorted = T_kelvin_actual[sorted_idx]
                 
-                if len(c_over_sqrt_t) > 0:
-                    # Сортируем для красивого графика
-                    sorted_idx = np.argsort(c_over_sqrt_t)
-                    c_over_sqrt_t_sorted = np.array(c_over_sqrt_t)[sorted_idx]
-                    T_kelvin_sorted = np.array(T_kelvin_actual)[sorted_idx]
-                    
-                    # Предсказания модели
-                    T_pred_sorted = temperature_model([k_temp, n_temp], 
-                                                    c_over_sqrt_t_sorted * np.sqrt([1]*len(c_over_sqrt_t_sorted)), 
-                                                    [1]*len(c_over_sqrt_t_sorted))
-                    
-                    axes[1].scatter(c_over_sqrt_t_sorted, T_kelvin_sorted, alpha=0.6, 
-                                   color='green', label='Эксперимент')
-                    axes[1].plot(c_over_sqrt_t_sorted, T_pred_sorted, 'r-', 
-                                linewidth=2, label='Модель')
-                    axes[1].set_xlabel('c/√t (%/√час)')
-                    axes[1].set_ylabel('Температура (K)')
-                    axes[1].set_title(f'Зависимость температуры от c/√t для зерна №{current_grain}')
-                    axes[1].legend()
-                    axes[1].grid(True, alpha=0.3)
-                    
-                    # Добавляем вторую ось Y в °C
-                    ax2 = axes[1].twinx()
-                    ylim_k = axes[1].get_ylim()
-                    ax2.set_ylim(ylim_k[0] - 273.15, ylim_k[1] - 273.15)
-                    ax2.set_ylabel('Температура (°C)')
-            
-            plt.tight_layout()
-            st.pyplot(fig)
-            
-            # КАЛЬКУЛЯТОР ДЛЯ МОДЕЛИ ТЕМПЕРАТУРЫ
-            st.subheader("🧮 Калькулятор модели температуры")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                calc_c = st.number_input("Содержание фазы c (%)", 
-                                       min_value=0.0, max_value=100.0, value=5.0, step=0.1)
-            with col2:
-                calc_t = st.number_input("Время t (часы)", 
-                                       min_value=0.1, value=100.0, step=10.0)
-            
-            if st.button("Рассчитать температуру", key='calc_temp'):
-                T_pred_k = temperature_model([k_temp, n_temp], calc_c, calc_t)
-                T_pred_c = T_pred_k - 273.15
+                # Предсказания модели
+                T_pred_sorted = temperature_model([k_temp, n_temp], 
+                                                c_over_sqrt_t_sorted * np.sqrt([1]*len(c_over_sqrt_t_sorted)), 
+                                                [1]*len(c_over_sqrt_t_sorted))
                 
-                st.success(f"**Прогнозируемая температура для зерна №{current_grain}:**")
-                st.info(f"""
-                - При содержании фазы {calc_c}% за время {calc_t} часов:
-                - Температура: {T_pred_c:.1f}°C ({T_pred_k:.1f} K)
-                - По формуле: T = {k_temp:.2f}·({calc_c}/√{calc_t})^{n_temp:.3f}
-                """)
-        else:
-            st.error("❌ Не удалось подобрать параметры модели температуры. Проверьте данные.")
+                axes[1].scatter(c_over_sqrt_t_sorted, T_kelvin_sorted - 273.15, alpha=0.6, 
+                               color='green', label='Эксперимент')
+                axes[1].plot(c_over_sqrt_t_sorted, T_pred_sorted - 273.15, 'r-', 
+                            linewidth=2, label='Модель')
+                axes[1].set_xlabel('c/√t (%/√час)')
+                axes[1].set_ylabel('Температура (°C)')
+                axes[1].set_title(f'Зависимость температуры от c/√t')
+                axes[1].legend()
+                axes[1].grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                st.pyplot(fig)
+                
+                # КАЛЬКУЛЯТОР ДЛЯ МОДЕЛИ ТЕМПЕРАТУРЫ
+                st.subheader("🧮 Калькулятор модели температуры")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    calc_c = st.number_input("Содержание фазы c (%)", 
+                                           min_value=0.0, max_value=100.0, value=5.0, step=0.1)
+                with col2:
+                    calc_t = st.number_input("Время t (часы)", 
+                                           min_value=0.1, value=100000.0, step=1000.0)
+                
+                if st.button("Рассчитать температуру", key='calc_temp'):
+                    T_pred_k = temperature_model([k_temp, n_temp], calc_c, calc_t)
+                    T_pred_c = T_pred_k - 273.15
+                    
+                    st.success(f"**Прогнозируемая температура для зерна №{current_grain}:**")
+                    st.info(f"""
+                    - При содержании фазы {calc_c}% за время {calc_t:,.0f} часов:
+                    - Температура: {T_pred_c:.1f}°C ({T_pred_k:.1f} K)
+                    - По формуле: T = {k_temp:.2f}·({calc_c}/√{calc_t:,.0f})^{n_temp:.3f}
+                    """)
+    else:
+        st.error("❌ Недостаточно данных в указанном диапазоне для построения модели")
 
     # ИНТЕРАКТИВНЫЙ ГРАФИК МОДЕЛИ
     st.header("5. 📈 Интерактивный график модели")

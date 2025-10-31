@@ -36,6 +36,7 @@ st.markdown("""
 - Учет температуры растворения σ-фазы (900°C)
 - Интерактивный калькулятор для прогнозирования
 - **НОВОЕ: Интерактивный график модели**
+- **НОВОЕ: Модель температуры T = k·(c/t^0.5)^n**
 - Аррениусовская зависимость констант скорости
 - Автоматическое масштабирование графиков под данные
 - **Поддержка анализа для разных зерен (8, 9, 10)**
@@ -127,6 +128,13 @@ with col5:
     dissolution_temperature = st.number_input("Темп. растворения (°C)", 
                                            value=900.0, min_value=0.0, step=10.0,
                                            help="Температура, выше которой σ-фаза растворяется")
+
+# НОВЫЙ ПАРАМЕТР: Включение модели температуры
+enable_temperature_model = st.checkbox(
+    "Включить модель температуры T = k·(c/t^0.5)^n", 
+    value=True,
+    help="Анализ зависимости температуры от содержания фазы и времени"
+)
 
 # Инициализация session_state для калькулятора
 if 'calc_type' not in st.session_state:
@@ -315,6 +323,63 @@ def universal_phase_model_array(t_array, T_array, A, Ea, n_jmak, T_min, T_diss):
     k_eff = effective_rate_constant_array(T_array, A, Ea, T_min, T_diss)
     f_normalized = jmak_model(t_array, k_eff, n_jmak)
     return f_normalized * 100
+
+# НОВАЯ ФУНКЦИЯ: Модель температуры T = k·(c/t^0.5)^n
+def temperature_model(params, c, t):
+    """Модель температуры: T = k·(c/t^0.5)^n"""
+    k, n = params
+    # Защита от деления на ноль и отрицательных значений
+    t_safe = np.maximum(t, 1e-10)
+    c_safe = np.maximum(c, 1e-10)
+    return k * (c_safe / np.sqrt(t_safe)) ** n
+
+def fit_temperature_model(df):
+    """Подбор параметров модели температуры T = k·(c/t^0.5)^n"""
+    try:
+        # Фильтруем данные: должны быть T, c (f), t
+        required_cols = ['T', 'f', 't']
+        if not all(col in df.columns for col in required_cols):
+            return None, None
+        
+        df_clean = df.dropna(subset=required_cols).copy()
+        
+        if len(df_clean) < 3:
+            return None, None
+        
+        # Преобразуем температуру в Кельвины
+        T_kelvin = df_clean['T'].values + 273.15
+        c_values = df_clean['f'].values
+        t_values = df_clean['t'].values
+        
+        # Начальные приближения
+        k_guess = 1000  # Примерное начальное значение
+        n_guess = 1.0   # Примерное начальное значение
+        
+        def model_to_fit(x, k, n):
+            c, t = x
+            return temperature_model([k, n], c, t)
+        
+        popt, pcov = curve_fit(
+            model_to_fit,
+            [c_values, t_values],
+            T_kelvin,
+            p0=[k_guess, n_guess],
+            bounds=([1, 0.1], [10000, 5]),
+            maxfev=5000
+        )
+        
+        return popt, pcov
+        
+    except Exception as e:
+        st.error(f"Ошибка подбора модели температуры: {str(e)}")
+        return None, None
+
+def predict_temperature_from_model(k, n, c, t):
+    """Прогноз температуры по модели T = k·(c/t^0.5)^n"""
+    t_safe = max(t, 1e-10)
+    c_safe = max(c, 1e-10)
+    T_kelvin = k * (c_safe / np.sqrt(t_safe)) ** n
+    return T_kelvin - 273.15  # Конвертируем обратно в °C
 
 def fit_universal_diameter_model(df, best_n, d0, T_min, T_diss):
     """Подбор параметров универсальной модели для диаметра"""
@@ -1179,8 +1244,157 @@ if 'grain_data' in st.session_state:
         else:
             st.error("❌ Не удалось подобрать параметры универсальной модели фазы")
 
+    # НОВЫЙ РАЗДЕЛ: МОДЕЛЬ ТЕМПЕРАТУРЫ T = k·(c/t^0.5)^n
+    if has_phase_data and enable_temperature_model:
+        st.header("4. 🌡️ Модель температуры T = k·(c/t^0.5)^n")
+        
+        with st.expander("💡 Объяснение модели температуры"):
+            st.markdown("""
+            **Модель температуры:**
+            $$ T = k \\cdot \\left(\\frac{c}{\\sqrt{t}}\\right)^n $$
+            
+            **Переменные:**
+            - $T$ - температура в Кельвинах
+            - $c$ - содержание σ-фазы в %
+            - $t$ - время в часах
+            - $k, n$ - эмпирические коэффициенты
+            
+            **Физический смысл:**
+            - Модель описывает зависимость температуры от содержания фазы и времени
+            - Параметр $k$ определяет масштаб температуры
+            - Параметр $n$ определяет нелинейность зависимости
+            - Модель полезна для прогнозирования температурных режимов
+            """)
+        
+        # Подбор параметров модели температуры
+        temperature_model_params, temperature_model_cov = fit_temperature_model(df_grain)
+        
+        if temperature_model_params is not None:
+            k_temp, n_temp = temperature_model_params
+            
+            # Сохраняем параметры в session_state
+            current_grain = st.session_state.get('current_grain', target_grain)
+            grain_key = f"grain_{current_grain}"
+            st.session_state[f'temperature_model_params_{grain_key}'] = temperature_model_params
+            st.session_state['current_temperature_model_params'] = temperature_model_params
+            
+            st.success(f"✅ Модель температуры для зерна №{current_grain} успешно подобрана!")
+            st.info(f"""
+            **Параметры модели температуры:**
+            - Коэффициент k = {k_temp:.2f} K
+            - Показатель степени n = {n_temp:.3f}
+            - Формула: T(K) = {k_temp:.2f}·(c/√t)^{n_temp:.3f}
+            - Формула в °C: T(°C) = {k_temp:.2f}·(c/√t)^{n_temp:.3f} - 273.15
+            """)
+            
+            # ВИЗУАЛИЗАЦИЯ МОДЕЛИ ТЕМПЕРАТУРЫ
+            st.subheader("Визуализация модели температуры")
+            
+            fig, axes = plt.subplots(1, 2, figsize=(15, 6))
+            
+            # График 1: Предсказания vs экспериментальные данные
+            all_predictions_temp = []
+            all_actual_temp = []
+            
+            # Вычисляем предсказанные температуры
+            for idx, row in df_grain.iterrows():
+                if pd.notna(row['f']) and pd.notna(row['t']):
+                    T_pred_kelvin = temperature_model([k_temp, n_temp], row['f'], row['t'])
+                    T_pred_celsius = T_pred_kelvin - 273.15
+                    all_predictions_temp.append(T_pred_celsius)
+                    all_actual_temp.append(row['T'])
+            
+            if len(all_actual_temp) > 0:
+                # График рассеяния: предсказанные vs фактические температуры
+                axes[0].scatter(all_actual_temp, all_predictions_temp, alpha=0.6, color='purple')
+                
+                min_temp = min(min(all_actual_temp), min(all_predictions_temp))
+                max_temp = max(max(all_actual_temp), max(all_predictions_temp))
+                margin = (max_temp - min_temp) * 0.1
+                
+                axes[0].plot([min_temp - margin, max_temp + margin], 
+                           [min_temp - margin, max_temp + margin], 
+                           'r--', linewidth=2, label='Идеальное согласие')
+                axes[0].set_xlabel('Фактическая температура (°C)')
+                axes[0].set_ylabel('Предсказанная температура (°C)')
+                axes[0].set_title(f'Качество модели температуры для зерна №{current_grain}')
+                axes[0].legend()
+                axes[0].grid(True, alpha=0.3)
+                
+                # Метрики качества
+                metrics_temp = calculate_comprehensive_metrics(all_actual_temp, all_predictions_temp)
+                axes[0].text(0.05, 0.95, 
+                            f"R² = {metrics_temp['R²']:.3f}\nRMSE = {metrics_temp['RMSE']:.2f}°C", 
+                            transform=axes[0].transAxes, verticalalignment='top',
+                            bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8))
+                
+                # График 2: Зависимость температуры от c/√t
+                c_over_sqrt_t = []
+                T_kelvin_actual = []
+                
+                for idx, row in df_grain.iterrows():
+                    if pd.notna(row['f']) and pd.notna(row['t']) and row['t'] > 0:
+                        c_val = row['f']
+                        t_val = row['t']
+                        c_over_sqrt_t.append(c_val / np.sqrt(t_val))
+                        T_kelvin_actual.append(row['T'] + 273.15)
+                
+                if len(c_over_sqrt_t) > 0:
+                    # Сортируем для красивого графика
+                    sorted_idx = np.argsort(c_over_sqrt_t)
+                    c_over_sqrt_t_sorted = np.array(c_over_sqrt_t)[sorted_idx]
+                    T_kelvin_sorted = np.array(T_kelvin_actual)[sorted_idx]
+                    
+                    # Предсказания модели
+                    T_pred_sorted = temperature_model([k_temp, n_temp], 
+                                                    c_over_sqrt_t_sorted * np.sqrt([1]*len(c_over_sqrt_t_sorted)), 
+                                                    [1]*len(c_over_sqrt_t_sorted))
+                    
+                    axes[1].scatter(c_over_sqrt_t_sorted, T_kelvin_sorted, alpha=0.6, 
+                                   color='green', label='Эксперимент')
+                    axes[1].plot(c_over_sqrt_t_sorted, T_pred_sorted, 'r-', 
+                                linewidth=2, label='Модель')
+                    axes[1].set_xlabel('c/√t (%/√час)')
+                    axes[1].set_ylabel('Температура (K)')
+                    axes[1].set_title(f'Зависимость температуры от c/√t для зерна №{current_grain}')
+                    axes[1].legend()
+                    axes[1].grid(True, alpha=0.3)
+                    
+                    # Добавляем вторую ось Y в °C
+                    ax2 = axes[1].twinx()
+                    ylim_k = axes[1].get_ylim()
+                    ax2.set_ylim(ylim_k[0] - 273.15, ylim_k[1] - 273.15)
+                    ax2.set_ylabel('Температура (°C)')
+            
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+            # КАЛЬКУЛЯТОР ДЛЯ МОДЕЛИ ТЕМПЕРАТУРЫ
+            st.subheader("🧮 Калькулятор модели температуры")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                calc_c = st.number_input("Содержание фазы c (%)", 
+                                       min_value=0.0, max_value=100.0, value=5.0, step=0.1)
+            with col2:
+                calc_t = st.number_input("Время t (часы)", 
+                                       min_value=0.1, value=100.0, step=10.0)
+            
+            if st.button("Рассчитать температуру", key='calc_temp'):
+                T_pred_k = temperature_model([k_temp, n_temp], calc_c, calc_t)
+                T_pred_c = T_pred_k - 273.15
+                
+                st.success(f"**Прогнозируемая температура для зерна №{current_grain}:**")
+                st.info(f"""
+                - При содержании фазы {calc_c}% за время {calc_t} часов:
+                - Температура: {T_pred_c:.1f}°C ({T_pred_k:.1f} K)
+                - По формуле: T = {k_temp:.2f}·({calc_c}/√{calc_t})^{n_temp:.3f}
+                """)
+        else:
+            st.error("❌ Не удалось подобрать параметры модели температуры. Проверьте данные.")
+
     # ИНТЕРАКТИВНЫЙ ГРАФИК МОДЕЛИ
-    st.header("4. 📈 Интерактивный график модели")
+    st.header("5. 📈 Интерактивный график модели")
     
     available_modes = []
     if has_diameter_data and st.session_state.get('current_universal_diameter_params') is not None:
@@ -1208,7 +1422,7 @@ if 'grain_data' in st.session_state:
         
     with col2:
         interactive_mode = st.selectbox("Параметр для графика:", 
-                                      ["Диаметр", "Содержание фазы"],
+                                      available_modes,
                                       key='interactive_mode_select')
         st.session_state.interactive_mode = interactive_mode
         
@@ -1272,7 +1486,7 @@ if 'grain_data' in st.session_state:
                 """)
 
     # КАЛЬКУЛЯТОР С СОХРАНЕНИЕМ СОСТОЯНИЯ
-    st.header("5. 🧮 Калькулятор прогнозирования")
+    st.header("6. 🧮 Калькулятор прогнозирования")
     
     # Используем session_state для сохранения состояния
     calc_type = st.radio("Тип расчета:", 
@@ -1444,7 +1658,12 @@ st.markdown(f"""
    - Выше {dissolution_temperature}°C: σ-фаза растворяется
    - {min_temperature}°C - {dissolution_temperature}°C: нормальный рост
 
-**Новый интерактивный график:**
+**Новая модель температуры T = k·(c/t^0.5)^n:**
+- Описывает зависимость температуры от содержания фазы и времени
+- Позволяет прогнозировать температурные режимы для заданного содержания фазы
+- Полезна для оптимизации технологических процессов
+
+**Интерактивный график:**
 - Позволяет визуализировать поведение системы для любой температуры
 - Показывает зависимость параметров от времени до 400,000 часов
 - Автоматически рассчитывает конечные значения параметров

@@ -341,7 +341,8 @@ def fit_temperature_model(df, temp_min=590, temp_max=660, time_min=20000, time_m
             (df['T'] >= temp_min) & 
             (df['T'] <= temp_max) & 
             (df['t'] >= time_min) & 
-            (df['t'] <= time_max)
+            (df['t'] <= time_max) &
+            (df['f'].notna())
         ].copy()
         
         st.info(f"🔍 Для подбора модели используется {len(df_filtered)} точек в диапазоне: "
@@ -356,57 +357,122 @@ def fit_temperature_model(df, temp_min=590, temp_max=660, time_min=20000, time_m
         c_values = df_filtered['f'].values
         t_values = df_filtered['t'].values
         
-        # Улучшенные начальные приближения на основе физических соображений
-        # Для T = k·(c/t^0.5)^n, где T в K, c в %, t в часах
-        k_guess = 800  # Более реалистичное начальное значение
-        n_guess = 0.8  # Более реалистичный показатель
+        # Улучшенные начальные приближения на основе ваших данных
+        # Для диапазона 590-660°C (863-933K) и содержания фазы 1-9%
+        k_guess = 900  # Начальное приближение для k
+        n_guess = 1.2  # Начальное приближение для n
+        
+        st.info(f"🎯 Начальные приближения: k={k_guess}, n={n_guess}")
         
         def model_to_fit(x, k, n):
             c, t = x
             return temperature_model([k, n], c, t)
         
-        # Пробуем разные методы оптимизации
-        methods = ['lm', 'trf', 'dogbox']
+        # Пробуем разные методы оптимизации с разными начальными значениями
+        initial_guesses = [
+            [800, 1.0],   # консервативный вариант
+            [900, 1.2],   # средний вариант  
+            [1000, 1.5],  # более агрессивный
+            [700, 0.8],   # меньшие значения
+            [1100, 1.8]   # большие значения
+        ]
+        
         best_params = None
         best_pcov = None
-        best_error = float('inf')
+        best_r2 = -float('inf')
         
-        for method in methods:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        for i, (k_guess, n_guess) in enumerate(initial_guesses):
+            progress = (i + 1) / len(initial_guesses)
+            progress_bar.progress(progress)
+            status_text.text(f"Тестирование начальных значений {i+1}/{len(initial_guesses)}: k={k_guess}, n={n_guess}")
+            
             try:
+                # Пробуем метод 'trf' (Trust Region Reflective) - обычно самый надежный
                 popt, pcov = curve_fit(
                     model_to_fit,
                     [c_values, t_values],
                     T_kelvin,
                     p0=[k_guess, n_guess],
-                    bounds=([100, 0.1], [2000, 3.0]),  # Расширенные границы
-                    method=method,
-                    maxfev=10000  # Увеличиваем количество итераций
+                    bounds=([500, 0.5], [1500, 3.0]),  # Расширенные границы
+                    method='trf',
+                    maxfev=10000,
+                    ftol=1e-8,  # Более строгая точность
+                    xtol=1e-8
                 )
                 
                 # Проверяем качество подбора
                 predictions = temperature_model(popt, c_values, t_values)
-                error = np.mean((predictions - T_kelvin)**2)
+                r2 = r2_score(T_kelvin, predictions)
                 
-                if error < best_error:
-                    best_error = error
+                if r2 > best_r2:
+                    best_r2 = r2
                     best_params = popt
                     best_pcov = pcov
-                    
-                st.success(f"✅ Метод {method}: k={popt[0]:.2f}, n={popt[1]:.3f}, ошибка={error:.2f}")
+                    st.success(f"✅ Найдено улучшение: k={popt[0]:.2f}, n={popt[1]:.3f}, R²={r2:.3f}")
                 
             except Exception as e:
-                st.warning(f"⚠️ Метод {method} не сработал: {str(e)}")
+                st.warning(f"⚠️ Начальные значения k={k_guess}, n={n_guess} не сработали")
                 continue
         
+        progress_bar.empty()
+        status_text.empty()
+        
         if best_params is not None:
+            st.success(f"🎯 Лучшие параметры: k={best_params[0]:.2f}, n={best_params[1]:.3f}, R²={best_r2:.3f}")
             return best_params, best_pcov
         else:
-            # Если автоматический подбор не сработал, пробуем ручной перебор
-            st.info("🔄 Пробуем ручной перебор параметров...")
-            return manual_parameter_search(df_filtered, temp_min, temp_max)
+            # Если автоматический подбор не сработал, используем аналитический подход
+            st.info("🔄 Используем аналитический метод подбора...")
+            return analytical_parameter_estimation(df_filtered)
             
     except Exception as e:
         st.error(f"Ошибка подбора модели температуры: {str(e)}")
+        return None, None
+
+def analytical_parameter_estimation(df):
+    """Аналитическая оценка параметров на основе данных"""
+    try:
+        # Преобразуем температуру в Кельвины
+        T_kelvin = df['T'].values + 273.15
+        c_values = df['f'].values
+        t_values = df['t'].values
+        
+        # Вычисляем c/√t для каждой точки
+        c_over_sqrt_t = c_values / np.sqrt(t_values)
+        
+        # Линеаризуем модель: log(T) = log(k) + n * log(c/√t)
+        log_T = np.log(T_kelvin)
+        log_ratio = np.log(c_over_sqrt_t)
+        
+        # Исключаем бесконечные значения
+        valid_mask = np.isfinite(log_T) & np.isfinite(log_ratio)
+        log_T_valid = log_T[valid_mask]
+        log_ratio_valid = log_ratio[valid_mask]
+        
+        if len(log_T_valid) < 2:
+            return None, None
+        
+        # Линейная регрессия для нахождения n и log(k)
+        slope, intercept, r_value, p_value, std_err = stats.linregress(
+            log_ratio_valid, log_T_valid
+        )
+        
+        n_est = slope
+        k_est = np.exp(intercept)
+        
+        # Проверяем качество
+        predictions = temperature_model([k_est, n_est], c_values, t_values)
+        r2 = r2_score(T_kelvin, predictions)
+        
+        st.success(f"📊 Аналитический метод: k={k_est:.2f}, n={n_est:.3f}, R²={r2:.3f}")
+        
+        return [k_est, n_est], None
+        
+    except Exception as e:
+        st.error(f"Ошибка аналитического метода: {str(e)}")
         return None, None
 
 def manual_parameter_search(df, temp_min, temp_max):
@@ -419,9 +485,9 @@ def manual_parameter_search(df, temp_min, temp_max):
     best_n = None
     best_r2 = -float('inf')
     
-    # Диапазоны для поиска (основанные на физических соображениях)
-    k_range = np.linspace(500, 1500, 50)
-    n_range = np.linspace(0.5, 2.0, 50)
+    # Более узкие диапазоны для поиска на основе ваших данных
+    k_range = np.linspace(700, 1200, 30)   # Узкий диапазон для k
+    n_range = np.linspace(0.8, 2.0, 30)    # Узкий диапазон для n
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -434,7 +500,9 @@ def manual_parameter_search(df, temp_min, temp_max):
             current_iteration += 1
             progress = current_iteration / total_iterations
             progress_bar.progress(progress)
-            status_text.text(f"Поиск параметров: {current_iteration}/{total_iterations}")
+            
+            if current_iteration % 100 == 0:
+                status_text.text(f"Поиск параметров: {current_iteration}/{total_iterations}")
             
             try:
                 predictions = temperature_model([k, n], c_values, t_values)
@@ -451,10 +519,10 @@ def manual_parameter_search(df, temp_min, temp_max):
     status_text.empty()
     
     if best_r2 > 0:
-        st.success(f"🎯 Найденные параметры: k={best_k:.2f}, n={best_n:.3f}, R²={best_r2:.3f}")
+        st.success(f"🎯 Ручной поиск: k={best_k:.2f}, n={best_n:.3f}, R²={best_r2:.3f}")
         return [best_k, best_n], None
     else:
-        st.error("❌ Не удалось найти подходящие параметры")
+        st.error("❌ Ручной поиск не дал результатов")
         return None, None
 
 # ДОБАВЬТЕ эту функцию для диагностики данных:
@@ -1422,48 +1490,7 @@ if 'has_phase_data' in st.session_state and st.session_state.has_phase_data and 
             custom_k_guess = st.number_input("Начальное k", 
                                            value=800.0, min_value=0.0, step=100.0)
         
-        if st.button("Подобрать параметры модели", key='fit_temp_model'):
-            with st.spinner("Подбираем параметры модели..."):
-                # Подбор параметров модели температуры
-                temperature_model_params, temperature_model_cov = fit_temperature_model(
-                    df_grain, custom_temp_min, custom_temp_max, custom_time_min, custom_time_max
-                )
-            
-            if temperature_model_params is not None:
-                k_temp, n_temp = temperature_model_params
-                
-                # Сохраняем параметры в session_state
-                current_grain = st.session_state.get('current_grain', target_grain)
-                grain_key = f"grain_{current_grain}"
-                st.session_state[f'temperature_model_params_{grain_key}'] = temperature_model_params
-                st.session_state['current_temperature_model_params'] = temperature_model_params
-                
-                # РАСЧЕТ КАЧЕСТВА МОДЕЛИ
-                T_kelvin_actual = df_diagnosed['T'].values + 273.15
-                predictions = temperature_model([k_temp, n_temp], 
-                                              df_diagnosed['f'].values, 
-                                              df_diagnosed['t'].values)
-                r2 = r2_score(T_kelvin_actual, predictions)
-                rmse = np.sqrt(mean_squared_error(T_kelvin_actual, predictions))
-                
-                st.success(f"✅ Модель температуры для зерна №{current_grain} успешно подобрана!")
-                st.info(f"""
-                **Параметры модели температуры:**
-                - Коэффициент k = {k_temp:.2f} K
-                - Показатель степени n = {n_temp:.3f}
-                - **Качество модели: R² = {r2:.3f}**
-                - Формула: T(K) = {k_temp:.2f}·(c/√t)^{n_temp:.3f}
-                - Формула в °C: T(°C) = {k_temp:.2f}·(c/√t)^{n_temp:.3f} - 273.15
-                """)
-                
-                if r2 < 0.9:
-                    st.warning("⚠️ Качество модели ниже целевого (R² < 0.9). Попробуйте:")
-                    st.markdown("""
-                    1. Проверить корректность данных
-                    2. Расширить диапазон поиска параметров
-                    3. Увеличить количество точек данных
-                    4. Проверить физическую адекватность модели
-                    """)
+if st.button("Подобрать параметры модели", key='fit_temp_model'):
                 
                 # ВИЗУАЛИЗАЦИЯ МОДЕЛИ ТЕМПЕРАТУРЫ
                 st.subheader("Визуализация модели температуры")
